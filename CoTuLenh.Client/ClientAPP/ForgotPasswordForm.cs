@@ -1,5 +1,3 @@
-using System.Net.Sockets;
-using System.Text;
 using System.Text.RegularExpressions;
 
 namespace ClientAPP;
@@ -39,23 +37,12 @@ public partial class ForgotPasswordForm : Form
 
         try
         {
-            using var tcpClient = new TcpClient();
-            await tcpClient.ConnectAsync("127.0.0.1", 8888);
-            using NetworkStream stream = tcpClient.GetStream();
+            var result = await AuthService.SendOtpAsync(email);
 
-            // Gửi: FORGOT_PASSWORD|SEND_OTP|email\n
-            string message = $"FORGOT_PASSWORD|SEND_OTP|{email}\n";
-            byte[] dataToSend = Encoding.UTF8.GetBytes(message);
-            await stream.WriteAsync(dataToSend, 0, dataToSend.Length);
-
-            byte[] buffer = new byte[1024];
-            int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-            string response = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-
-            if (response == "OTP_SENT")
+            if (result.Success)
             {
                 savedEmail = email;
-                MessageBox.Show("Mã OTP đã được gửi về email của bạn. Vui lòng kiểm tra hộp thư!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(result.Message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
                 // Chuyển sang giao diện Nhập OTP & Đặt lại mật khẩu
                 pnlSendOtp.Visible = false;
@@ -66,12 +53,12 @@ public partial class ForgotPasswordForm : Form
             }
             else
             {
-                lblOtpError.Text = string.IsNullOrEmpty(response) ? "Không tìm thấy email trên hệ thống!" : response;
+                lblOtpError.Text = result.Message;
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            lblOtpError.Text = "Không thể kết nối đến máy chủ!";
+            lblOtpError.Text = $"Lỗi: {ex.Message}";
         }
         finally
         {
@@ -112,31 +99,21 @@ public partial class ForgotPasswordForm : Form
     {
         try
         {
-            using var tcpClient = new TcpClient();
-            await tcpClient.ConnectAsync("127.0.0.1", 8888);
-            using NetworkStream stream = tcpClient.GetStream();
+            var result = await AuthService.SendOtpAsync(savedEmail);
 
-            string message = $"FORGOT_PASSWORD|SEND_OTP|{savedEmail}\n";
-            byte[] dataToSend = Encoding.UTF8.GetBytes(message);
-            await stream.WriteAsync(dataToSend, 0, dataToSend.Length);
-
-            byte[] buffer = new byte[1024];
-            int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-            string response = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-
-            if (response == "OTP_SENT")
+            if (result.Success)
             {
                 MessageBox.Show("Đã gửi lại mã OTP mới về email!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 StartCountdown();
             }
             else
             {
-                lblResetError.Text = "Không thể gửi lại mã OTP!";
+                lblResetError.Text = result.Message;
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            lblResetError.Text = "Không thể kết nối đến máy chủ!";
+            lblResetError.Text = $"Lỗi: {ex.Message}";
         }
     }
 
@@ -186,33 +163,22 @@ public partial class ForgotPasswordForm : Form
 
         try
         {
-            using var tcpClient = new TcpClient();
-            await tcpClient.ConnectAsync("127.0.0.1", 8888);
-            using NetworkStream stream = tcpClient.GetStream();
+            var result = await AuthService.ResetPasswordAsync(savedEmail, otp, newPassword);
 
-            // Gửi: FORGOT_PASSWORD|RESET|email|otp|newPassword\n
-            string message = $"FORGOT_PASSWORD|RESET|{savedEmail}|{otp}|{newPassword}\n";
-            byte[] dataToSend = Encoding.UTF8.GetBytes(message);
-            await stream.WriteAsync(dataToSend, 0, dataToSend.Length);
-
-            byte[] buffer = new byte[1024];
-            int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-            string response = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-
-            if (response == "RESET_SUCCESS")
+            if (result.Success)
             {
                 timerCountdown.Stop();
-                MessageBox.Show("Đổi mật khẩu thành công! Bạn có thể đăng nhập ngay bây giờ.", "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(result.Message, "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 OpenLoginForm();
             }
             else
             {
-                lblResetError.Text = string.IsNullOrEmpty(response) ? "Mã OTP sai hoặc đã hết hạn!" : response;
+                lblResetError.Text = result.Message;
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            lblResetError.Text = "Không thể kết nối đến máy chủ!";
+            lblResetError.Text = $"Lỗi: {ex.Message}";
         }
         finally
         {

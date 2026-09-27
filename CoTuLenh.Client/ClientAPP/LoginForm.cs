@@ -1,4 +1,3 @@
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
@@ -64,23 +63,9 @@ public partial class LoginForm : Form
 
         try
         {
-            using var tcpClient = new TcpClient();
+            var result = await AuthService.LoginAsync(username, password);
 
-            // Kết nối đến Server IP & Port (127.0.0.1:8888)
-            await tcpClient.ConnectAsync("127.0.0.1", 8888);
-            using NetworkStream stream = tcpClient.GetStream();
-
-            // Gửi: LOGIN|user|pass\n
-            string message = $"LOGIN|{username}|{password}\n";
-            byte[] dataToSend = Encoding.UTF8.GetBytes(message);
-            await stream.WriteAsync(dataToSend, 0, dataToSend.Length);
-
-            // Đọc phản hồi từ Server
-            byte[] buffer = new byte[1024];
-            int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-            string response = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-
-            if (response == "LOGIN_SUCCESS")
+            if (result.Success)
             {
                 // === XỬ LÝ GHI NHỚ ĐĂNG NHẬP ===
                 if (chkRememberMe.Checked)
@@ -102,17 +87,17 @@ public partial class LoginForm : Form
                     }
                 }
 
-                MessageBox.Show("Đăng nhập thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(result.Message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 // TODO: Chuyển màn hình vào sảnh game (Lobby / MainForm)
             }
             else
             {
-                lblErrorMessage.Text = "Sai tài khoản hoặc mật khẩu!";
+                lblErrorMessage.Text = result.Message;
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            lblErrorMessage.Text = "Không thể kết nối tới Server!";
+            lblErrorMessage.Text = $"Lỗi: {ex.Message}";
         }
         finally
         {
