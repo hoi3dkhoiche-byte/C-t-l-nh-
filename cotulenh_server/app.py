@@ -73,7 +73,7 @@ def register():
         len(password) < 6
         or not re.search(r"[a-zA-Z]", password)
         or not re.search(r"[0-9]", password)
-        or not re.search(r"[^a-zA-z0-9]", password)
+        or not re.search(r"[^a-zA-Z0-9]", password)
     ):
         return jsonify ({
             "success" : False,
@@ -91,14 +91,14 @@ def register():
             "message" : "Tên đăng nhập đã tồn tại",
         }),409
     mail = db.session.scalar(db.select(User).filter_by(email=email))
-    if mail == email: 
+    if mail is not None: 
         return jsonify ({
             "success" : False,
             "message" : "Email đã tồn tại",
         }), 409
     password_hash = bcrypt.hashpw(
         password.encode("utf-8"),
-        bcrypt,gensalt(),
+        bcrypt.gensalt(),
     ).decode("utf-8")
 
     user = User(
