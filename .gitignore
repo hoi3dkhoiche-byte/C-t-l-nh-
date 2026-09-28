@@ -38,3 +38,11 @@ ehthumbs.db
 
 # Folder config file
 Desktop.ini
+# ===== Python =====
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.env
+*.db
+*.sqlite3
