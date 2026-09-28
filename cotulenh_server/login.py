@@ -7,7 +7,7 @@ def thu(ten,body):
     print(f"{ten:<20} -> HTTP {r.status_code} | {r.json()}")
 
 
-thu("Dung", {"username": "dung", "password": "123456"})
+thu("Dung", {"username": "dung", "password": "Abc@123"})
 thu("Sai mat khau", {"username": "dung", "password": "sai"})
 thu("Sai tai khoan", {"username": "nam", "password": "Abc@123"})
 thu("Thieu mat khau", {"username": "dung"})
