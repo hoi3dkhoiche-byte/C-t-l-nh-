@@ -46,3 +46,8 @@ venv/
 .env
 *.db
 *.sqlite3
+
+.DS_Store
+cotulenh_server/.env
+cotulenh_server/__pycache__/
+cotulenh_server/*.py[cod]
