@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace ClientAPP;
 
-public partial class ForgotPasswordForm : Form
+public partial class ForgotPasswordForm : BaseForm
 {
     private string savedEmail = "";
     private int countdownSeconds = 60;

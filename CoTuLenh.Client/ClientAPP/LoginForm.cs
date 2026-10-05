@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace ClientAPP;
 
-public partial class LoginForm : Form
+public partial class LoginForm : BaseForm
 {
     private readonly string rememberFilePath = "remember.json";
 
@@ -88,7 +88,21 @@ public partial class LoginForm : Form
                 }
 
                 MessageBox.Show(result.Message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                // TODO: Chuyển màn hình vào sảnh game (Lobby / MainForm)
+                
+                // Khởi tạo phiên người dùng và chuyển màn hình vào sảnh game (LobbyForm)
+                SessionService.Instance.SetCurrentUser(new UserModel
+                {
+                    Username = username,
+                    Email = username.Contains("@") ? username : $"{username}@cotulenh.vn",
+                    Coins = 50000,
+                    EloRating = 1200,
+                    Wins = 10,
+                    Losses = 3
+                }, result.Token);
+
+                var lobby = new LobbyForm();
+                lobby.Show();
+                this.Hide();
             }
             else
             {

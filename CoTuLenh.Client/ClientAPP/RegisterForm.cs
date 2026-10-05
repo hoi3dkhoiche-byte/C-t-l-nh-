@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace ClientAPP;
 
-public partial class RegisterForm : Form
+public partial class RegisterForm : BaseForm
 {
     public RegisterForm()
     {
