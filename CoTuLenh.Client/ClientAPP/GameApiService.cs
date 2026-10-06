@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Net.Http.Headers;
 
 namespace ClientAPP;
 
@@ -10,6 +11,15 @@ public class GameApiService
 
     private readonly HttpClient _client;
     private static readonly JsonSerializerOptions jsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private void SetAuthHeader()
+{
+    var token = SessionService.Instance.Token;
+
+    _client.DefaultRequestHeaders.Authorization =
+        string.IsNullOrWhiteSpace(token)
+            ? null
+            : new AuthenticationHeaderValue("Bearer", token);
+}
 
     private GameApiService()
     {
@@ -24,12 +34,19 @@ public class GameApiService
     {
         try
         {
+            SetAuthHeader();
             var res = await _client.GetAsync("rooms");
+            
             if (res.IsSuccessStatusCode)
             {
                 var content = await res.Content.ReadAsStringAsync();
-                var rooms = JsonSerializer.Deserialize<List<RoomModel>>(content, jsonOptions);
-                if (rooms != null) return rooms;
+
+                using var document = JsonDocument.Parse(content);
+                if (document.RootElement.TryGetProperty("rooms", out var roomsElement))
+                {
+                    var rooms = roomsElement.Deserialize<List<RoomModel>>(jsonOptions);
+                    if (rooms != null) return rooms;
+                }
             }
         }
         catch
@@ -53,11 +70,18 @@ public class GameApiService
         {
             var payload = new { bet_amount = betAmount };
             var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            SetAuthHeader();
             var res = await _client.PostAsync("rooms", content);
+
             if (res.IsSuccessStatusCode)
             {
                 var body = await res.Content.ReadAsStringAsync();
-                return JsonSerializer.Deserialize<RoomModel>(body, jsonOptions);
+
+                using var document = JsonDocument.Parse(body);
+                if (document.RootElement.TryGetProperty("room", out var roomElement))
+                {
+                    return roomElement.Deserialize<RoomModel>(jsonOptions);
+                }
             }
         }
         catch

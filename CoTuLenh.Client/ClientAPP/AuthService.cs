@@ -28,28 +28,60 @@ public static class AuthService
     };
 
     // 1. ĐĂNG NHẬP (POST /api/auth/login)
-    public static async Task<ApiResponse> LoginAsync(string username, string password)
+public static async Task<ApiResponse> LoginAsync(string username, string password)
+{
+    try
     {
-        try
+        var payload = new { identifier = username, password };
+        var content = new StringContent(
+            JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json"
+        );
+
+        HttpResponseMessage response = await client.PostAsync("login", content);
+        string responseBody = await response.Content.ReadAsStringAsync();
+
+        if (string.IsNullOrWhiteSpace(responseBody))
         {
-            var payload = new { username, password };
-            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-            HttpResponseMessage response = await client.PostAsync("login", content);
-            string responseBody = await response.Content.ReadAsStringAsync();
-
-            if (!string.IsNullOrWhiteSpace(responseBody))
+            return new ApiResponse
             {
-                var result = JsonSerializer.Deserialize<ApiResponse>(responseBody, jsonOptions);
-                if (result != null) return result;
-            }
+                Success = false,
+                Message = "Máy chủ không trả về dữ liệu."
+            };
+        }
+
+        using var document = JsonDocument.Parse(responseBody);
+        var root = document.RootElement;
+
+        if (response.IsSuccessStatusCode)
+        {
+            string? token = root.TryGetProperty("access_token", out var tokenElement)
+                ? tokenElement.GetString()
+                : null;
 
             return new ApiResponse
             {
-                Success = response.IsSuccessStatusCode,
-                Message = response.IsSuccessStatusCode ? "Đăng nhập thành công!" : "Tài khoản hoặc mật khẩu không chính xác!"
+                Success = token != null,
+                Message = token != null
+                    ? "Đăng nhập thành công!"
+                    : "Đăng nhập được nhưng máy chủ không trả về token.",
+                Token = token
             };
         }
+
+        string message =
+            root.TryGetProperty("msg", out var msgElement) ? msgElement.GetString() ?? "" :
+            root.TryGetProperty("message", out var messageElement) ? messageElement.GetString() ?? "" :
+            "Tài khoản hoặc mật khẩu không chính xác!";
+
+        return new ApiResponse
+        {
+            Success = false,
+            Message = message
+        };
+    }
+
         catch (HttpRequestException)
         {
             return new ApiResponse { Success = false, Message = "Không thể kết nối đến máy chủ Web API!" };
@@ -75,18 +107,33 @@ public static class AuthService
             HttpResponseMessage response = await client.PostAsync("register", content);
             string responseBody = await response.Content.ReadAsStringAsync();
 
-            if (!string.IsNullOrWhiteSpace(responseBody))
+            if (string.IsNullOrWhiteSpace(responseBody))
             {
-                var result = JsonSerializer.Deserialize<ApiResponse>(responseBody, jsonOptions);
-                if (result != null) return result;
+                return new ApiResponse
+                {
+                    Success = false,
+                    Message = "Máy chủ không trả về dữ liệu."
+                };
             }
+
+            using var document = JsonDocument.Parse(responseBody);
+            var root = document.RootElement;
+
+            string message =
+                root.TryGetProperty("message", out var messageElement)
+                    ? messageElement.GetString() ?? ""
+                    : root.TryGetProperty("msg", out var msgElement)
+                        ? msgElement.GetString() ?? ""
+                        : response.IsSuccessStatusCode
+                            ? "Đăng ký thành công!"
+                            : "Đăng ký thất bại!";
 
             return new ApiResponse
             {
                 Success = response.IsSuccessStatusCode,
-                Message = response.IsSuccessStatusCode ? "Đăng ký thành công!" : "Đăng ký thất bại!"
+                Message = message
             };
-        }
+            }
         catch (HttpRequestException)
         {
             return new ApiResponse { Success = false, Message = "Không thể kết nối đến máy chủ Web API!" };
