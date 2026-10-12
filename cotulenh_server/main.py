@@ -12,6 +12,7 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required, ge
 
 from flask_bcrypt import Bcrypt
 from models import db, User, Room
+from pwdrs_routes import reset_bp 
 
 load_dotenv(Path(__file__).resolve().with_name(".env"))
 
@@ -24,6 +25,7 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db.init_app(app)
 migrate = Migrate(app, db)
+app.register_blueprint(reset_bp)
 socketio = SocketIO(app, async_mode="threading")
 
 
