@@ -39,9 +39,9 @@ public partial class RegisterForm : BaseForm
         bool hasDigit = Regex.IsMatch(password, "[0-9]");
         bool hasSpecial = Regex.IsMatch(password, "[^a-zA-Z0-9]");
 
-        if (password.Length < 6 || !hasLetter || !hasDigit || !hasSpecial)
+        if (password.Length < 8 || !hasLetter || !hasDigit || !hasSpecial)
         {
-            lblErrorMessage.Text = "Mật khẩu phải từ 6 ký tự, gồm cả chữ, số và ký tự đặc biệt!";
+            lblErrorMessage.Text = "Mật khẩu phải từ 8 ký tự, gồm cả chữ, số và ký tự đặc biệt!";
             txtPassword.Focus();
             return;
         }

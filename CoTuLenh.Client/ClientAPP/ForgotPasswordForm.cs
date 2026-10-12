@@ -144,9 +144,9 @@ public partial class ForgotPasswordForm : BaseForm
         bool hasDigit = Regex.IsMatch(newPassword, "[0-9]");
         bool hasSpecial = Regex.IsMatch(newPassword, "[^a-zA-Z0-9]");
 
-        if (newPassword.Length < 6 || !hasLetter || !hasDigit || !hasSpecial)
+        if (newPassword.Length < 8 || !hasLetter || !hasDigit || !hasSpecial)
         {
-            lblResetError.Text = "Mật khẩu mới phải từ 6 ký tự, gồm chữ, số và ký tự đặc biệt!";
+            lblResetError.Text = "Mật khẩu mới phải từ 8 ký tự, gồm chữ, số và ký tự đặc biệt!";
             txtNewPassword.Focus();
             return;
         }
