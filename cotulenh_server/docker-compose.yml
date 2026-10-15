@@ -1,0 +1,35 @@
+# Chạy: docker compose up --build   (lần đầu mất vài phút để tải image)
+services:
+  # ---------- Database MySQL ----------
+  db:
+    image: mysql:8.4                          
+    restart: unless-stopped                   
+    environment:                             
+      MYSQL_DATABASE: cotulenh
+      MYSQL_USER: cotulenh
+      MYSQL_PASSWORD: ${DB_PASSWORD:-cotulenh123}          
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root123}
+    volumes:
+      - db_data:/var/lib/mysql              
+    healthcheck:                             
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  # ---------- Server Flask ----------
+  server:
+    build: .                                 
+    restart: unless-stopped
+    env_file: .env                            
+    environment:
+      DATABASE_URL: mysql+pymysql://cotulenh:${DB_PASSWORD:-cotulenh123}@db:3306/cotulenh
+    ports:
+      - "5000:5000"                           
+    depends_on:
+      db:
+        condition: service_healthy           
+
+volumes:
+  db_data:
