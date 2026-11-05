@@ -9,6 +9,10 @@ services:
       MYSQL_USER: cotulenh
       MYSQL_PASSWORD: ${DB_PASSWORD:-cotulenh123}          
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root123}
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --innodb-log-buffer-size=16M
+      - --max-connections=50
     volumes:
       - db_data:/var/lib/mysql              
     healthcheck:                             
