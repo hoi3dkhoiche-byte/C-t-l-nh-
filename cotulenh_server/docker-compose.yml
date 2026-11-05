@@ -28,7 +28,8 @@ services:
     restart: unless-stopped
     env_file: .env                            
     environment:
-      DATABASE_URL: mysql+pymysql://cotulenh:${DB_PASSWORD:-cotulenh123}@db:3306/cotulenh
+      # Nếu trong .env có DATABASE_URL (ví dụ AWS RDS) thì dùng giá trị đó; nếu không thì dùng DB nội bộ của Docker
+      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://cotulenh:${DB_PASSWORD:-cotulenh123}@db:3306/cotulenh}
     ports:
       - "5000:5000"                           
     depends_on:

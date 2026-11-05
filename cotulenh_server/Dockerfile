@@ -15,4 +15,4 @@ COPY . .
 EXPOSE 5000
 
 
-CMD ["sh", "-c", "flask --app main db upgrade && gunicorn --workers 1 --threads 100 --bind 0.0.0.0:5000 main:app"]
+CMD ["sh", "-c", "flask --app main db upgrade && gunicorn -k gthread --workers 1 --threads 100 --timeout 120 --bind 0.0.0.0:5000 main:app"]

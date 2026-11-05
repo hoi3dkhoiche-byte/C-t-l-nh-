@@ -17,11 +17,28 @@ from pwdrs_routes import reset_bp
 load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 app = Flask(__name__)
-app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
+
+# Cấu hình JWT (có fallback an toàn khi chưa điền env)
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY") or "cotulenh-dev-jwt-secret-key-min-32-chars-replace-in-production"
 jwt = JWTManager(app)
-bcrypt=Bcrypt(app)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
+bcrypt = Bcrypt(app)
+
+# Cấu hình Database (Hỗ trợ AWS RDS và Local)
+database_url = os.getenv("DATABASE_URL")
+if not database_url:
+    # Fallback cho chạy test cục bộ nếu chưa set DATABASE_URL
+    database_url = "sqlite:///cotulenh.db"
+
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+# Cấu hình Pool tối ưu cho AWS RDS:
+# - pool_pre_ping: Tự kiểm tra kết nối còn sống trước khi query (tránh lỗi "MySQL server has gone away")
+# - pool_recycle: Tự làm mới kết nối sau 280 giây (tránh bị AWS RDS / NAT timeout cắt ngang)
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+    "pool_pre_ping": True,
+    "pool_recycle": 280,
+}
 
 db.init_app(app)
 migrate = Migrate(app, db)
