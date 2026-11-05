@@ -459,6 +459,19 @@ public partial class GamePlayForm : BaseForm
     private void EndGame(bool isVictory, string reason)
     {
         gameTimer.Stop();
+
+        string outcome = isVictory ? "red_win" : "blue_win";
+        if (reason.Contains("Hoà") || reason.Contains("hòa") || reason.Contains("Hoà"))
+        {
+            outcome = "draw";
+        }
+
+        // Báo kết quả ván đấu lên server để ghi nhận vào CSDL và phát sóng Real-time qua WebSocket
+        _ = Task.Run(async () =>
+        {
+            await GameApiService.Instance.FinishMatchAsync(_room.RoomCode, outcome, _room.BetAmount);
+        });
+
         int eloChange = isVictory ? 15 : -12;
         int coinReward = isVictory ? _room.BetAmount : -_room.BetAmount;
 

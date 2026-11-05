@@ -11,7 +11,7 @@ from sqlalchemy import text
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 
 from flask_bcrypt import Bcrypt
-from models import db, User, Room
+from models import db, User, Room, Match
 from pwdrs_routes import reset_bp 
 
 load_dotenv(Path(__file__).resolve().with_name(".env"))
@@ -192,6 +192,11 @@ def login(): #API đăng nhập
             "id": user.id,
             "username": user.username,
             "email": user.email,
+            "coins": user.coins or 0,
+            "elo_rating": user.elo_rating or 1200,
+            "wins": user.wins or 0,
+            "losses": user.losses or 0,
+            "draws": user.draws or 0,
         },
     }), 200
 
@@ -209,9 +214,224 @@ def get_current_user():
             "id": user.id,
             "username": user.username,
             "email": user.email,
+            "coins": user.coins or 0,
+            "elo_rating": user.elo_rating or 1200,
+            "wins": user.wins or 0,
+            "losses": user.losses or 0,
+            "draws": user.draws or 0,
+        }
+    }), 200
+
+
+# =============================================================================
+# LEADERBOARD & REALTIME MATCH ENGINE
+# =============================================================================
+
+def calculate_elo(red_elo, blue_elo, result, k=32):
+    """
+    Thuật toán ELO chuẩn quốc tế:
+    - result: 'red_win', 'blue_win', 'draw'
+    - k: hệ số biến động (mặc định 32)
+    """
+    expected_red = 1.0 / (1.0 + 10.0 ** ((blue_elo - red_elo) / 400.0))
+    expected_blue = 1.0 - expected_red
+
+    if result == "red_win":
+        actual_red, actual_blue = 1.0, 0.0
+    elif result == "blue_win":
+        actual_red, actual_blue = 0.0, 1.0
+    else:  # draw
+        actual_red, actual_blue = 0.5, 0.5
+
+    delta_red = round(k * (actual_red - expected_red))
+    delta_blue = round(k * (actual_blue - expected_blue))
+    return delta_red, delta_blue
+
+
+def get_top_leaderboard(limit=50):
+    """Lấy danh sách Top người chơi có ELO cao nhất"""
+    users = User.query.order_by(User.elo_rating.desc(), User.wins.desc()).limit(limit).all()
+    result = []
+    for rank, u in enumerate(users, start=1):
+        total = (u.wins or 0) + (u.losses or 0) + (u.draws or 0)
+        win_rate = round((u.wins / total * 100), 1) if total > 0 else 0.0
+        result.append({
+            "rank": rank,
+            "id": u.id,
+            "username": u.username,
+            "elo_rating": u.elo_rating or 1200,
+            "wins": u.wins or 0,
+            "losses": u.losses or 0,
+            "draws": u.draws or 0,
+            "win_rate": win_rate,
+            "coins": u.coins or 0,
+        })
+    return result
+
+
+@app.get("/api/leaderboard")
+def get_leaderboard():
+    """API lấy danh sách bảng xếp hạng ELO"""
+    top = get_top_leaderboard(50)
+    return jsonify(top), 200
+
+
+@app.post("/api/matches/finish")
+@jwt_required()
+def finish_match():
+    """
+    API ghi nhận kết thúc ván đấu:
+    - Tính toán ELO mới cho 2 bên
+    - Cập nhật số trận thắng/thua/hòa và số dư xu
+    - Lưu vào bảng matches
+    - Phát sóng WebSocket 'leaderboard_updated' cho toàn bộ client kết nối
+    """
+    current_user_id = int(get_jwt_identity())
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    room_code = data.get("room_code", "SOLO")
+    result = data.get("result", "red_win")  # 'red_win', 'blue_win', 'draw'
+    bet_amount = max(0, int(data.get("bet_amount", 0)))
+    opponent_id = data.get("opponent_id")
+
+    # Xác định đối thủ (nếu là trận đấu với bot/người chơi khác)
+    opponent = None
+    if opponent_id and isinstance(opponent_id, int):
+        opponent = db.session.get(User, opponent_id)
+
+    red_elo = user.elo_rating or 1200
+    blue_elo = opponent.elo_rating if opponent else 1200
+
+    delta_red, delta_blue = calculate_elo(red_elo, blue_elo, result)
+
+    # Đảm bảo ELO tối thiểu không âm
+    user.elo_rating = max(100, red_elo + delta_red)
+
+    if result == "red_win":
+        user.wins = (user.wins or 0) + 1
+        user.coins = (user.coins or 0) + bet_amount
+        winner_id = user.id
+    elif result == "blue_win":
+        user.losses = (user.losses or 0) + 1
+        user.coins = max(0, (user.coins or 0) - bet_amount)
+        winner_id = opponent.id if opponent else None
+    else:
+        user.draws = (user.draws or 0) + 1
+        winner_id = None
+
+    if opponent:
+        opponent.elo_rating = max(100, blue_elo + delta_blue)
+        if result == "blue_win":
+            opponent.wins = (opponent.wins or 0) + 1
+            opponent.coins = (opponent.coins or 0) + bet_amount
+        elif result == "red_win":
+            opponent.losses = (opponent.losses or 0) + 1
+            opponent.coins = max(0, (opponent.coins or 0) - bet_amount)
+        else:
+            opponent.draws = (opponent.draws or 0) + 1
+
+    match = Match(
+        room_code=room_code,
+        red_player_id=user.id,
+        blue_player_id=opponent.id if opponent else user.id,
+        winner_id=winner_id,
+        result=result,
+        red_elo_change=delta_red,
+        blue_elo_change=delta_blue,
+        coin_bet=bet_amount,
+    )
+    db.session.add(match)
+    db.session.commit()
+
+    # Phát sóng Real-time cập nhật Bảng Xếp Hạng tới TẤT CẢ client
+    updated_leaderboard = get_top_leaderboard(50)
+    socketio.emit("leaderboard_updated", {
+        "leaderboard": updated_leaderboard,
+        "affected_user_id": user.id,
+        "elo_change": delta_red,
+    })
+
+    return jsonify({
+        "success": True,
+        "message": "Trận đấu đã được ghi nhận thành công!",
+        "new_elo": user.elo_rating,
+        "elo_change": delta_red,
+        "new_coins": user.coins,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "elo_rating": user.elo_rating,
+            "wins": user.wins,
+            "losses": user.losses,
+            "draws": user.draws,
             "coins": user.coins,
         }
     }), 200
+
+
+@app.get("/api/matches/history")
+@jwt_required()
+def get_match_history():
+    """Lấy danh sách các trận đấu gần nhất của người dùng"""
+    user_id = int(get_jwt_identity())
+    matches = Match.query.filter(
+        (Match.red_player_id == user_id) | (Match.blue_player_id == user_id)
+    ).order_by(Match.created_at.desc()).limit(20).all()
+
+    history = []
+    for m in matches:
+        is_red = (m.red_player_id == user_id)
+        opponent_id = m.blue_player_id if is_red else m.red_player_id
+        opponent = db.session.get(User, opponent_id) if opponent_id != user_id else None
+        opp_name = opponent.username if opponent else "Thiếu Tá Quân Khu (Bot)"
+
+        if m.result == "draw":
+            outcome = "Hòa"
+        elif (m.result == "red_win" and is_red) or (m.result == "blue_win" and not is_red):
+            outcome = "Thắng"
+        else:
+            outcome = "Thua"
+
+        elo_delta = m.red_elo_change if is_red else m.blue_elo_change
+        coin_delta = m.coin_bet if outcome == "Thắng" else (-m.coin_bet if outcome == "Thua" else 0)
+
+        history.append({
+            "id": m.id,
+            "room_code": m.room_code or "CTL-SOLO",
+            "opponent_name": opp_name,
+            "side": "red" if is_red else "blue",
+            "result": outcome,
+            "elo_change": elo_delta,
+            "coin_change": coin_delta,
+            "played_at": m.created_at.isoformat(),
+        })
+
+    return jsonify(history), 200
+
+
+# =============================================================================
+# SOCKET.IO REALTIME EVENTS
+# =============================================================================
+
+@socketio.on("connect")
+def handle_connect():
+    print(f"[SocketIO] Client đã kết nối: {request.sid}")
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    print(f"[SocketIO] Client đã ngắt kết nối: {request.sid}")
+
+
+@socketio.on("request_leaderboard")
+def handle_request_leaderboard():
+    """Client yêu cầu dữ liệu bảng xếp hạng qua socket"""
+    top = get_top_leaderboard(50)
+    socketio.emit("leaderboard_updated", {"leaderboard": top}, to=request.sid)
+
 
 if __name__ == "__main__":
     socketio.run(app, host="127.0.0.1", port=5000, debug=True)

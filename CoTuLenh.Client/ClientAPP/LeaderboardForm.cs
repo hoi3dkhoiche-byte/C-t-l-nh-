@@ -10,12 +10,31 @@ public partial class LeaderboardForm : BaseForm
     {
         InitializeComponent();
         this.Load += LeaderboardForm_Load;
+        this.FormClosed += LeaderboardForm_FormClosed;
     }
 
     private async void LeaderboardForm_Load(object? sender, EventArgs e)
     {
         SetupColumns();
+        RealtimeService.Instance.OnLeaderboardUpdated += RealtimeService_OnLeaderboardUpdated;
         await LoadDataAsync();
+        _ = RealtimeService.Instance.ConnectAsync();
+    }
+
+    private void LeaderboardForm_FormClosed(object? sender, FormClosedEventArgs e)
+    {
+        RealtimeService.Instance.OnLeaderboardUpdated -= RealtimeService_OnLeaderboardUpdated;
+    }
+
+    private void RealtimeService_OnLeaderboardUpdated(List<UserModel> updatedUsers)
+    {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+
+        this.Invoke(() =>
+        {
+            users = updatedUsers;
+            DisplayList();
+        });
     }
 
     private void SetupColumns()

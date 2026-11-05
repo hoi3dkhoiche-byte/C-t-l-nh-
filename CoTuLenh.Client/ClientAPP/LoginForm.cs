@@ -89,16 +89,22 @@ public partial class LoginForm : BaseForm
 
                 MessageBox.Show(result.Message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 
-                // Khởi tạo phiên người dùng và chuyển màn hình vào sảnh game (LobbyForm)
-                SessionService.Instance.SetCurrentUser(new UserModel
+                // Khởi tạo phiên người dùng từ dữ liệu thật trả về từ máy chủ
+                var currentUser = result.User ?? new UserModel
                 {
                     Username = username,
                     Email = username.Contains("@") ? username : $"{username}@cotulenh.vn",
-                    Coins = 50000,
+                    Coins = 0,
                     EloRating = 1200,
-                    Wins = 10,
-                    Losses = 3
-                }, result.Token);
+                    Wins = 0,
+                    Losses = 0,
+                    Draws = 0
+                };
+
+                SessionService.Instance.SetCurrentUser(currentUser, result.Token);
+
+                // Khởi động kết nối Realtime Socket.IO
+                _ = RealtimeService.Instance.ConnectAsync();
 
                 var lobby = new LobbyForm();
                 lobby.Show();
