@@ -8,6 +8,7 @@ public class ApiResponse
     public bool Success { get; set; }
     public string Message { get; set; } = "";
     public string? Token { get; set; }
+    public UserModel? User { get; set; }
 }
 
 /// <summary>
@@ -60,13 +61,20 @@ public static async Task<ApiResponse> LoginAsync(string username, string passwor
                 ? tokenElement.GetString()
                 : null;
 
+            UserModel? user = null;
+            if (root.TryGetProperty("user", out var userElement))
+            {
+                user = userElement.Deserialize<UserModel>(jsonOptions);
+            }
+
             return new ApiResponse
             {
                 Success = token != null,
                 Message = token != null
                     ? "Đăng nhập thành công!"
                     : "Đăng nhập được nhưng máy chủ không trả về token.",
-                Token = token
+                Token = token,
+                User = user
             };
         }
 

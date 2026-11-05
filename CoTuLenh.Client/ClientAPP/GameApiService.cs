@@ -105,12 +105,13 @@ public class GameApiService
     {
         try
         {
+            SetAuthHeader();
             var res = await _client.GetAsync("leaderboard");
             if (res.IsSuccessStatusCode)
             {
                 var body = await res.Content.ReadAsStringAsync();
                 var list = JsonSerializer.Deserialize<List<UserModel>>(body, jsonOptions);
-                if (list != null) return list;
+                if (list != null && list.Count > 0) return list;
             }
         }
         catch { }
@@ -126,16 +127,51 @@ public class GameApiService
         };
     }
 
+    public async Task<bool> FinishMatchAsync(string roomCode, string result, int betAmount, int? opponentId = null)
+    {
+        try
+        {
+            SetAuthHeader();
+            var payload = new
+            {
+                room_code = roomCode,
+                result = result, // "red_win", "blue_win", "draw"
+                bet_amount = betAmount,
+                opponent_id = opponentId
+            };
+            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            var res = await _client.PostAsync("matches/finish", content);
+            if (res.IsSuccessStatusCode)
+            {
+                var body = await res.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("user", out var userElem))
+                {
+                    var updatedUser = userElem.Deserialize<UserModel>(jsonOptions);
+                    if (updatedUser != null)
+                    {
+                        SessionService.Instance.SetCurrentUser(updatedUser, SessionService.Instance.Token);
+                    }
+                }
+                return true;
+            }
+        }
+        catch { }
+
+        return false;
+    }
+
     public async Task<List<MatchModel>> GetMatchHistoryAsync()
     {
         try
         {
+            SetAuthHeader();
             var res = await _client.GetAsync("matches/history");
             if (res.IsSuccessStatusCode)
             {
                 var body = await res.Content.ReadAsStringAsync();
                 var list = JsonSerializer.Deserialize<List<MatchModel>>(body, jsonOptions);
-                if (list != null) return list;
+                if (list != null && list.Count > 0) return list;
             }
         }
         catch { }

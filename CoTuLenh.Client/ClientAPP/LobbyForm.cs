@@ -15,6 +15,7 @@ public partial class LobbyForm : BaseForm
     private async void LobbyForm_Load(object? sender, EventArgs e)
     {
         UpdateUserInfoDisplay();
+        _ = RealtimeService.Instance.ConnectAsync();
         await LoadRoomsAsync();
     }
 
