@@ -8,7 +8,7 @@ from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_socketio import SocketIO
 from sqlalchemy import text
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 
 from flask_bcrypt import Bcrypt
 from models import db, User, Room, Match
@@ -416,14 +416,30 @@ def get_match_history():
 # SOCKET.IO REALTIME EVENTS
 # =============================================================================
 
+connected_users = {}
+
 @socketio.on("connect")
-def handle_connect():
-    print(f"[SocketIO] Client đã kết nối: {request.sid}")
+def handle_connect(auth=None):
+    token = auth.get("token") if isinstance(auth, dict) else None
+
+    if not token:
+        print(f"[SocketIO] Khách kết nối: {request.sid}")
+        return
+
+    try:
+        decoded = decode_token(token)
+    except Exception:
+        print(f"[SocketIO] Từ chối, token không hợp lệ: {request.sid}")
+        return False
+
+    connected_users[request.sid] = int(decoded["sub"])
+    print(f"[SocketIO] User {decoded['sub']} kết nối: {request.sid}")
 
 
 @socketio.on("disconnect")
-def handle_disconnect():
-    print(f"[SocketIO] Client đã ngắt kết nối: {request.sid}")
+def handle_disconnect(reason=None):
+    user_id = connected_users.pop(request.sid, None)
+    print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
 
 
 @socketio.on("request_leaderboard")
