@@ -7,9 +7,10 @@ import threading
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_migrate import Migrate
-from flask_socketio import SocketIO, join_room, emit
+from flask_socketio import SocketIO, join_room, leave_room, emit
 from sqlalchemy import text
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
+
 
 from flask_bcrypt import Bcrypt
 from models import db, User, Room, Match
@@ -440,12 +441,15 @@ def handle_connect(auth=None):
 @socketio.on("disconnect")
 def handle_disconnect(reason=None):
     user_id = connected_users.pop(request.sid, None)
+    remove_from_room(request.sid, user_id)
     print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
 
 
 active_rooms = {}  
 
 rooms_lock = threading.Lock()
+
+user_rooms = {}  
 
 
 @socketio.on("join_room")
@@ -456,6 +460,9 @@ def handle_join_room(data):
         return
 
     room_code = str((data or {}).get("room_code") or "").strip()
+    if user_rooms.get(request.sid) not in (None, room_code):
+        emit("error", {"code": "ALREADY_IN_ROOM", "message": "Bạn đang ở phòng khác"})
+        return
     room = Room.query.filter_by(room_code=room_code).first()
     if room is None:
         emit("error", {"code": "ROOM_NOT_FOUND", "message": "Phòng không tồn tại"})
@@ -479,6 +486,7 @@ def handle_join_room(data):
         return
 
     join_room(room_code)
+    user_rooms[request.sid] = room_code
     emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color})
     emit(
         "player_joined",
@@ -486,6 +494,44 @@ def handle_join_room(data):
         to=room_code,
         include_self=False,
     )
+
+def remove_from_room(sid, user_id):
+    room_code = user_rooms.pop(sid, None)
+    if room_code is None:
+        return None
+
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        if players is None:
+            return room_code
+        if players["red"] == user_id:
+            active_rooms.pop(room_code, None)
+            closed = True
+            others = [s for s, rc in user_rooms.items() if rc == room_code]
+            for s in others:
+                user_rooms.pop(s, None)
+        else:
+            if players["blue"] == user_id:
+                players["blue"] = None
+            closed = False
+            others = []
+
+    leave_room(room_code, sid=sid)
+    socketio.emit(
+        "player_left",
+        {"user_id": user_id, "room_closed": closed},
+        to=room_code,
+    )
+    for s in others:
+        leave_room(room_code, sid=s)
+    return room_code
+
+
+@socketio.on("leave_room")
+def handle_leave_room(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = remove_from_room(request.sid, user_id)
+    emit("room_left", {"room_code": room_code})
 
 
 @socketio.on("request_leaderboard")
