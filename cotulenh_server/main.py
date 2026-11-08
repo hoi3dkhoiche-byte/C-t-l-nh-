@@ -2,11 +2,12 @@ import os
 from pathlib import Path
 import secrets
 import string
+import threading
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_migrate import Migrate
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, join_room, emit
 from sqlalchemy import text
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 
@@ -440,6 +441,51 @@ def handle_connect(auth=None):
 def handle_disconnect(reason=None):
     user_id = connected_users.pop(request.sid, None)
     print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
+
+
+active_rooms = {}  
+
+rooms_lock = threading.Lock()
+
+
+@socketio.on("join_room")
+def handle_join_room(data):
+    user_id = connected_users.get(request.sid)
+    if user_id is None:
+        emit("error", {"code": "AUTH_REQUIRED", "message": "Cần đăng nhập"})
+        return
+
+    room_code = str((data or {}).get("room_code") or "").strip()
+    room = Room.query.filter_by(room_code=room_code).first()
+    if room is None:
+        emit("error", {"code": "ROOM_NOT_FOUND", "message": "Phòng không tồn tại"})
+        return
+
+    with rooms_lock:
+        players = active_rooms.setdefault(
+            room_code, {"red": room.host_user_id, "blue": None}
+        )
+        if user_id == players["red"]:
+            color = "red"
+        elif players["blue"] in (None, user_id):
+            players["blue"] = user_id
+            color = "blue"
+        else:
+            color = None
+        snapshot = dict(players)
+
+    if color is None:
+        emit("error", {"code": "ROOM_FULL", "message": "Phòng đã đủ người"})
+        return
+
+    join_room(room_code)
+    emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color})
+    emit(
+        "player_joined",
+        {"user_id": user_id, "color": color},
+        to=room_code,
+        include_self=False,
+    )
 
 
 @socketio.on("request_leaderboard")
