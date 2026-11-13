@@ -441,7 +441,8 @@ def handle_connect(auth=None):
 @socketio.on("disconnect")
 def handle_disconnect(reason=None):
     user_id = connected_users.pop(request.sid, None)
-    remove_from_room(request.sid, user_id)
+    if not hold_seat(request.sid, user_id):
+        remove_from_room(request.sid, user_id)
     print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
 
 
@@ -493,6 +494,8 @@ user_rooms = {}
 
 room_states = {}  # mã (trạng thái: waiting, ready, playing và danh sách người chơi đã sẵn sàng)
 
+RECONNECT_TIMEOUT = int(os.getenv("RECONNECT_TIMEOUT", "50"))
+
 
 @socketio.on("join_room")
 def handle_join_room(data):
@@ -522,6 +525,8 @@ def handle_join_room(data):
         else:
             color = None
         snapshot = dict(players)
+        state = room_states.get(room_code)
+        reconnected = bool(state) and state.get("waiting_reconnect", {}).pop(user_id, None) is not None
 
     if color is None:
         emit("error", {"code": "ROOM_FULL", "message": "Phòng đã đủ người"})
@@ -530,15 +535,19 @@ def handle_join_room(data):
     join_room(room_code)
     user_rooms[request.sid] = room_code
     emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color})
-    emit(
-        "player_joined",
-        {"user_id": user_id, "color": color},
-        to=room_code,
-        include_self=False,
-    )
+    if reconnected:
+        emit("player_reconnected", {"user_id": user_id}, to=room_code, include_self=False)
+    else:
+        emit(
+            "player_joined",
+            {"user_id": user_id, "color": color},
+            to=room_code,
+            include_self=False,
+        )
 
-def remove_from_room(sid, user_id, forfeit=False):
-    room_code = user_rooms.pop(sid, None)
+def remove_from_room(sid, user_id, forfeit=False, room_code=None):
+    if sid is not None:
+        room_code = user_rooms.pop(sid, None)
     if room_code is None:
         return None
 
@@ -577,7 +586,8 @@ def remove_from_room(sid, user_id, forfeit=False):
             to=room_code,
         )
 
-    leave_room(room_code, sid=sid)
+    if sid is not None:
+        leave_room(room_code, sid=sid)
     socketio.emit(
         "player_left",
         {"user_id": user_id, "room_closed": closed},
@@ -586,6 +596,41 @@ def remove_from_room(sid, user_id, forfeit=False):
     for s in others:
         leave_room(room_code, sid=s)
     return room_code
+
+def hold_seat(sid, user_id):
+    room_code = user_rooms.get(sid)
+    if room_code is None:
+        return False
+
+    with rooms_lock:
+        state = room_states.get(room_code)
+        if state is None or state["status"] != "playing":
+            return False
+        user_rooms.pop(sid, None)
+        token = object()
+        state.setdefault("waiting_reconnect", {})[user_id] = token
+
+    socketio.emit(
+        "opponent_disconnected",
+        {"user_id": user_id, "timeout_seconds": RECONNECT_TIMEOUT},
+        to=room_code,
+    )
+    socketio.start_background_task(forfeit_after_timeout, room_code, user_id, token)
+    return True
+
+
+def forfeit_after_timeout(room_code, user_id, token):
+    socketio.sleep(RECONNECT_TIMEOUT)
+
+    with rooms_lock:
+        state = room_states.get(room_code)
+        waiting = state.get("waiting_reconnect", {}) if state else {}
+        if waiting.get(user_id) is not token:
+            return
+        waiting.pop(user_id, None)
+
+    with app.app_context():
+        remove_from_room(None, user_id, forfeit=True, room_code=room_code)
 
 
 @socketio.on("leave_room")
