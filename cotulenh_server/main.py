@@ -451,6 +451,8 @@ rooms_lock = threading.Lock()
 
 user_rooms = {}  
 
+room_states = {}  # mã (trạng thái: waiting, ready, playing và danh sách người chơi đã sẵn sàng)
+
 
 @socketio.on("join_room")
 def handle_join_room(data):
@@ -504,6 +506,7 @@ def remove_from_room(sid, user_id):
         players = active_rooms.get(room_code)
         if players is None:
             return room_code
+        room_states.pop(room_code, None)
         if players["red"] == user_id:
             active_rooms.pop(room_code, None)
             closed = True
@@ -532,6 +535,39 @@ def handle_leave_room(data=None):
     user_id = connected_users.get(request.sid)
     room_code = remove_from_room(request.sid, user_id)
     emit("room_left", {"room_code": room_code})
+
+
+@socketio.on("player_ready")
+def handle_player_ready(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = user_rooms.get(request.sid)
+    if user_id is None or room_code is None:
+        emit("error", {"code": "NOT_IN_ROOM", "message": "Bạn chưa vào phòng"})
+        return
+
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        if players is None:
+            return
+        state = room_states.setdefault(
+            room_code, {"status": "waiting", "ready": set()}
+        )
+        if state["status"] == "playing":
+            return
+        state["ready"].add(user_id)
+        both = {players["red"], players["blue"]}
+        started = None not in both and state["ready"] >= both
+        if started:
+            state["status"] = "playing"
+        snapshot = dict(players)
+
+    emit("player_ready", {"user_id": user_id}, to=room_code)
+    if started:
+        emit(
+            "game_started",
+            {"room_code": room_code, "players": snapshot, "first_turn": "red", "state": None},
+            to=room_code,
+        )
 
 
 @socketio.on("request_leaderboard")
