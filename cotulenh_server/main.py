@@ -447,6 +447,46 @@ def handle_disconnect(reason=None):
 
 active_rooms = {}  
 
+def record_match(room_code, red_id, blue_id, result, bet=0):
+    red = db.session.get(User, red_id)
+    blue = db.session.get(User, blue_id)
+    red_elo = red.elo_rating or 1200
+    blue_elo = blue.elo_rating or 1200
+    delta_red, delta_blue = calculate_elo(red_elo, blue_elo, result)
+    red.elo_rating = max(100, red_elo + delta_red)
+    blue.elo_rating = max(100, blue_elo + delta_blue)
+
+    if result == "red_win":
+        winner, loser = red, blue
+    elif result == "blue_win":
+        winner, loser = blue, red
+    else:
+        winner, loser = None, None
+
+    if winner:
+        winner.wins = (winner.wins or 0) + 1
+        loser.losses = (loser.losses or 0) + 1
+        paid = min(bet, loser.coins or 0)
+        winner.coins = (winner.coins or 0) + paid
+        loser.coins = (loser.coins or 0) - paid
+    else:
+        red.draws = (red.draws or 0) + 1
+        blue.draws = (blue.draws or 0) + 1
+
+    db.session.add(Match(
+        room_code=room_code,
+        red_player_id=red.id,
+        blue_player_id=blue.id,
+        winner_id=winner.id if winner else None,
+        result=result,
+        red_elo_change=delta_red,
+        blue_elo_change=delta_blue,
+        coin_bet=bet,
+    ))
+    db.session.commit()
+    socketio.emit("leaderboard_updated", {"leaderboard": get_top_leaderboard(50)})
+    return delta_red, delta_blue
+
 rooms_lock = threading.Lock()
 
 user_rooms = {}  
@@ -497,7 +537,7 @@ def handle_join_room(data):
         include_self=False,
     )
 
-def remove_from_room(sid, user_id):
+def remove_from_room(sid, user_id, forfeit=False):
     room_code = user_rooms.pop(sid, None)
     if room_code is None:
         return None
@@ -506,7 +546,9 @@ def remove_from_room(sid, user_id):
         players = active_rooms.get(room_code)
         if players is None:
             return room_code
-        room_states.pop(room_code, None)
+        state = room_states.pop(room_code, None)
+        was_playing = state is not None and state["status"] == "playing"
+        snapshot = dict(players)
         if players["red"] == user_id:
             active_rooms.pop(room_code, None)
             closed = True
@@ -518,6 +560,22 @@ def remove_from_room(sid, user_id):
                 players["blue"] = None
             closed = False
             others = []
+
+    if was_playing and forfeit:
+        result = "blue_win" if user_id == snapshot["red"] else "red_win"
+        delta_red, delta_blue = record_match(
+        room_code, snapshot["red"], snapshot["blue"], result
+        )
+        socketio.emit(
+            "game_over",
+            {
+                "result": result,
+                "winner_id": snapshot["blue"] if result == "blue_win" else snapshot["red"],
+                "reason": "opponent_left",
+                "elo_change": {"red": delta_red, "blue": delta_blue},
+            },
+            to=room_code,
+        )
 
     leave_room(room_code, sid=sid)
     socketio.emit(
@@ -533,7 +591,7 @@ def remove_from_room(sid, user_id):
 @socketio.on("leave_room")
 def handle_leave_room(data=None):
     user_id = connected_users.get(request.sid)
-    room_code = remove_from_room(request.sid, user_id)
+    room_code = remove_from_room(request.sid, user_id, forfeit=True)
     emit("room_left", {"room_code": room_code})
 
 
