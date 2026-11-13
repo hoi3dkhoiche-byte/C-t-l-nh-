@@ -2,13 +2,15 @@ import os
 from pathlib import Path
 import secrets
 import string
+import threading
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_migrate import Migrate
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, join_room, leave_room, emit
 from sqlalchemy import text
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
+
 
 from flask_bcrypt import Bcrypt
 from models import db, User, Room, Match
@@ -416,14 +418,259 @@ def get_match_history():
 # SOCKET.IO REALTIME EVENTS
 # =============================================================================
 
+connected_users = {}
+
 @socketio.on("connect")
-def handle_connect():
-    print(f"[SocketIO] Client đã kết nối: {request.sid}")
+def handle_connect(auth=None):
+    token = auth.get("token") if isinstance(auth, dict) else None
+
+    if not token:
+        print(f"[SocketIO] Khách kết nối: {request.sid}")
+        return
+
+    try:
+        decoded = decode_token(token)
+    except Exception:
+        print(f"[SocketIO] Từ chối, token không hợp lệ: {request.sid}")
+        return False
+
+    connected_users[request.sid] = int(decoded["sub"])
+    print(f"[SocketIO] User {decoded['sub']} kết nối: {request.sid}")
 
 
 @socketio.on("disconnect")
-def handle_disconnect():
-    print(f"[SocketIO] Client đã ngắt kết nối: {request.sid}")
+def handle_disconnect(reason=None):
+    user_id = connected_users.pop(request.sid, None)
+    if not hold_seat(request.sid, user_id):
+        remove_from_room(request.sid, user_id)
+    print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
+
+
+active_rooms = {}  
+
+def record_match(room_code, red_id, blue_id, result, bet=0):
+    red = db.session.get(User, red_id)
+    blue = db.session.get(User, blue_id)
+    red_elo = red.elo_rating or 1200
+    blue_elo = blue.elo_rating or 1200
+    delta_red, delta_blue = calculate_elo(red_elo, blue_elo, result)
+    red.elo_rating = max(100, red_elo + delta_red)
+    blue.elo_rating = max(100, blue_elo + delta_blue)
+
+    if result == "red_win":
+        winner, loser = red, blue
+    elif result == "blue_win":
+        winner, loser = blue, red
+    else:
+        winner, loser = None, None
+
+    if winner:
+        winner.wins = (winner.wins or 0) + 1
+        loser.losses = (loser.losses or 0) + 1
+        paid = min(bet, loser.coins or 0)
+        winner.coins = (winner.coins or 0) + paid
+        loser.coins = (loser.coins or 0) - paid
+    else:
+        red.draws = (red.draws or 0) + 1
+        blue.draws = (blue.draws or 0) + 1
+
+    db.session.add(Match(
+        room_code=room_code,
+        red_player_id=red.id,
+        blue_player_id=blue.id,
+        winner_id=winner.id if winner else None,
+        result=result,
+        red_elo_change=delta_red,
+        blue_elo_change=delta_blue,
+        coin_bet=bet,
+    ))
+    db.session.commit()
+    socketio.emit("leaderboard_updated", {"leaderboard": get_top_leaderboard(50)})
+    return delta_red, delta_blue
+
+rooms_lock = threading.Lock()
+
+user_rooms = {}  
+
+room_states = {}  # mã (trạng thái: waiting, ready, playing và danh sách người chơi đã sẵn sàng)
+
+RECONNECT_TIMEOUT = int(os.getenv("RECONNECT_TIMEOUT", "50"))
+
+
+@socketio.on("join_room")
+def handle_join_room(data):
+    user_id = connected_users.get(request.sid)
+    if user_id is None:
+        emit("error", {"code": "AUTH_REQUIRED", "message": "Cần đăng nhập"})
+        return
+
+    room_code = str((data or {}).get("room_code") or "").strip()
+    if user_rooms.get(request.sid) not in (None, room_code):
+        emit("error", {"code": "ALREADY_IN_ROOM", "message": "Bạn đang ở phòng khác"})
+        return
+    room = Room.query.filter_by(room_code=room_code).first()
+    if room is None:
+        emit("error", {"code": "ROOM_NOT_FOUND", "message": "Phòng không tồn tại"})
+        return
+
+    with rooms_lock:
+        players = active_rooms.setdefault(
+            room_code, {"red": room.host_user_id, "blue": None}
+        )
+        if user_id == players["red"]:
+            color = "red"
+        elif players["blue"] in (None, user_id):
+            players["blue"] = user_id
+            color = "blue"
+        else:
+            color = None
+        snapshot = dict(players)
+        state = room_states.get(room_code)
+        reconnected = bool(state) and state.get("waiting_reconnect", {}).pop(user_id, None) is not None
+
+    if color is None:
+        emit("error", {"code": "ROOM_FULL", "message": "Phòng đã đủ người"})
+        return
+
+    join_room(room_code)
+    user_rooms[request.sid] = room_code
+    emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color})
+    if reconnected:
+        emit("player_reconnected", {"user_id": user_id}, to=room_code, include_self=False)
+    else:
+        emit(
+            "player_joined",
+            {"user_id": user_id, "color": color},
+            to=room_code,
+            include_self=False,
+        )
+
+def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="opponent_left"):
+    if sid is not None:
+        room_code = user_rooms.pop(sid, None)
+    if room_code is None:
+        return None
+
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        if players is None:
+            return room_code
+        state = room_states.pop(room_code, None)
+        was_playing = state is not None and state["status"] == "playing"
+        snapshot = dict(players)
+        if players["red"] == user_id:
+            active_rooms.pop(room_code, None)
+            closed = True
+            others = [s for s, rc in user_rooms.items() if rc == room_code]
+            for s in others:
+                user_rooms.pop(s, None)
+        else:
+            if players["blue"] == user_id:
+                players["blue"] = None
+            closed = False
+            others = []
+
+    if was_playing and forfeit:
+        result = "blue_win" if user_id == snapshot["red"] else "red_win"
+        delta_red, delta_blue = record_match(
+        room_code, snapshot["red"], snapshot["blue"], result
+        )
+        socketio.emit(
+            "game_over",
+            {
+                "result": result,
+                "winner_id": snapshot["blue"] if result == "blue_win" else snapshot["red"],
+                "reason": reason,
+                "elo_change": {"red": delta_red, "blue": delta_blue},
+            },
+            to=room_code,
+        )
+
+    if sid is not None:
+        leave_room(room_code, sid=sid)
+    socketio.emit(
+        "player_left",
+        {"user_id": user_id, "room_closed": closed},
+        to=room_code,
+    )
+    for s in others:
+        leave_room(room_code, sid=s)
+    return room_code
+
+def hold_seat(sid, user_id):
+    room_code = user_rooms.get(sid)
+    if room_code is None:
+        return False
+
+    with rooms_lock:
+        state = room_states.get(room_code)
+        if state is None or state["status"] != "playing":
+            return False
+        user_rooms.pop(sid, None)
+        token = object()
+        state.setdefault("waiting_reconnect", {})[user_id] = token
+
+    socketio.emit(
+        "opponent_disconnected",
+        {"user_id": user_id, "timeout_seconds": RECONNECT_TIMEOUT},
+        to=room_code,
+    )
+    socketio.start_background_task(forfeit_after_timeout, room_code, user_id, token)
+    return True
+
+
+def forfeit_after_timeout(room_code, user_id, token):
+    socketio.sleep(RECONNECT_TIMEOUT)
+
+    with rooms_lock:
+        state = room_states.get(room_code)
+        waiting = state.get("waiting_reconnect", {}) if state else {}
+        if waiting.get(user_id) is not token:
+            return
+        waiting.pop(user_id, None)
+
+    with app.app_context():
+        remove_from_room(None, user_id, forfeit=True, room_code=room_code, reason="disconnect_timeout")
+
+
+@socketio.on("leave_room")
+def handle_leave_room(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = remove_from_room(request.sid, user_id, forfeit=True)
+    emit("room_left", {"room_code": room_code})
+
+
+@socketio.on("player_ready")
+def handle_player_ready(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = user_rooms.get(request.sid)
+    if user_id is None or room_code is None:
+        emit("error", {"code": "NOT_IN_ROOM", "message": "Bạn chưa vào phòng"})
+        return
+
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        if players is None:
+            return
+        state = room_states.setdefault(
+            room_code, {"status": "waiting", "ready": set()}
+        )
+        if state["status"] == "playing":
+            return
+        state["ready"].add(user_id)
+        both = {players["red"], players["blue"]}
+        started = None not in both and state["ready"] >= both
+        if started:
+            state["status"] = "playing"
+        snapshot = dict(players)
+
+    emit("player_ready", {"user_id": user_id}, to=room_code)
+    if started:
+        emit(
+            "game_started",
+            {"room_code": room_code, "players": snapshot, "first_turn": "red", "state": None},
+            to=room_code,
+        )
 
 
 @socketio.on("request_leaderboard")
