@@ -545,7 +545,7 @@ def handle_join_room(data):
             include_self=False,
         )
 
-def remove_from_room(sid, user_id, forfeit=False, room_code=None):
+def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="opponent_left"):
     if sid is not None:
         room_code = user_rooms.pop(sid, None)
     if room_code is None:
@@ -580,7 +580,7 @@ def remove_from_room(sid, user_id, forfeit=False, room_code=None):
             {
                 "result": result,
                 "winner_id": snapshot["blue"] if result == "blue_win" else snapshot["red"],
-                "reason": "opponent_left",
+                "reason": reason,
                 "elo_change": {"red": delta_red, "blue": delta_blue},
             },
             to=room_code,
@@ -630,7 +630,7 @@ def forfeit_after_timeout(room_code, user_id, token):
         waiting.pop(user_id, None)
 
     with app.app_context():
-        remove_from_room(None, user_id, forfeit=True, room_code=room_code)
+        remove_from_room(None, user_id, forfeit=True, room_code=room_code, reason="disconnect_timeout")
 
 
 @socketio.on("leave_room")
