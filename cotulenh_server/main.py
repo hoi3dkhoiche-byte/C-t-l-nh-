@@ -675,15 +675,40 @@ def handle_player_ready(data=None):
             state["moves"] = []
             state["pieces"] = game_engine.initial_pieces()
             board = [asdict(p) for p in state["pieces"]]
+            turn_token = state["turn_token"] = object()
         snapshot = dict(players)
 
     emit("player_ready", {"user_id": user_id}, to=room_code)
     if started:
         emit(
             "game_started",
-            {"room_code": room_code, "players": snapshot, "first_turn": "red", "board": board},
+            {
+                "room_code": room_code,
+                "players": snapshot,
+                "first_turn": "red",
+                "turn_seconds": TURN_SECONDS,
+                "board": board,
+            },
             to=room_code,
         )
+        socketio.start_background_task(turn_timeout, room_code, turn_token)
+
+TURN_SECONDS = int(os.getenv("TURN_SECONDS", "45"))
+
+
+def turn_timeout(room_code, token):
+    socketio.sleep(TURN_SECONDS)
+    with rooms_lock:
+        state = room_states.get(room_code)
+        if not state or state.get("turn_token") is not token:
+            return
+        skipped = state["turn"]
+        state["turn"] = game_engine.other_side(skipped)
+        new_token = state["turn_token"] = object()
+        next_turn = state["turn"]
+
+    socketio.emit("turn_timeout", {"skipped": skipped, "next_turn": next_turn}, to=room_code)
+    socketio.start_background_task(turn_timeout, room_code, new_token)
 
 def finish_game(room_code, players, winner, reason):
     result = "red_win" if winner == "red" else "blue_win"
@@ -745,6 +770,8 @@ def handle_make_move(data=None):
             winner, reason = game_engine.check_winner(state["pieces"], state["turn"])
             if winner:
                 room_states.pop(room_code, None)
+            else:
+                turn_token = state["turn_token"] = object()
             snapshot = dict(players)
             next_turn = None if winner else state["turn"]
 
@@ -755,6 +782,9 @@ def handle_make_move(data=None):
     emit("move_made", {"move": move, "next_turn": next_turn}, to=room_code)
     if winner:
         finish_game(room_code, snapshot, winner, reason)
+    else:
+        socketio.start_background_task(turn_timeout, room_code, turn_token)
+
 
 
 @socketio.on("request_leaderboard")
