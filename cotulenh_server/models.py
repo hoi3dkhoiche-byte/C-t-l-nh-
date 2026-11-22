@@ -17,6 +17,9 @@ class User(db.Model):
     wins = db.Column(db.Integer, nullable=False, default=0)
     losses = db.Column(db.Integer, nullable=False, default=0)
     draws = db.Column(db.Integer, nullable=False, default=0)
+    reputation = db.Column(db.Integer, nullable=False, default=10, server_default="10")
+    abandon_streak = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    banned_until = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(
         db.DateTime,
         nullable=False,

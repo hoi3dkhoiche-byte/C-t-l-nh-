@@ -223,6 +223,8 @@ def get_current_user():
             "wins": user.wins or 0,
             "losses": user.losses or 0,
             "draws": user.draws or 0,
+            "reputation": user.reputation,
+            "banned_until": user.banned_until.isoformat() if user.banned_until else None,
         }
     }), 200
 
