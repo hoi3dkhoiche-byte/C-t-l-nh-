@@ -14,6 +14,8 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required, ge
 
 from flask_bcrypt import Bcrypt
 from models import db, User, Room, Match
+from dataclasses import asdict
+import game_engine
 from pwdrs_routes import reset_bp 
 
 load_dotenv(Path(__file__).resolve().with_name(".env"))
@@ -662,15 +664,90 @@ def handle_player_ready(data=None):
         started = None not in both and state["ready"] >= both
         if started:
             state["status"] = "playing"
+            state["turn"] = "red"
+            state["moves"] = []
+            state["pieces"] = game_engine.initial_pieces()
+            board = [asdict(p) for p in state["pieces"]]
         snapshot = dict(players)
 
     emit("player_ready", {"user_id": user_id}, to=room_code)
     if started:
         emit(
             "game_started",
-            {"room_code": room_code, "players": snapshot, "first_turn": "red", "state": None},
+            {"room_code": room_code, "players": snapshot, "first_turn": "red", "board": board},
             to=room_code,
         )
+
+def finish_game(room_code, players, winner, reason):
+    result = "red_win" if winner == "red" else "blue_win"
+    delta_red, delta_blue = record_match(room_code, players["red"], players["blue"], result)
+    socketio.emit(
+        "game_over",
+        {
+            "result": result,
+            "winner_id": players[winner],
+            "reason": reason,
+            "elo_change": {"red": delta_red, "blue": delta_blue},
+        },
+        to=room_code,
+    )
+
+
+@socketio.on("make_move")
+def handle_make_move(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = user_rooms.get(request.sid)
+    if user_id is None or room_code is None:
+        emit("error", {"code": "NOT_IN_ROOM", "message": "Bạn chưa vào phòng"})
+        return
+
+    data = data or {}
+    try:
+        piece_id = str(data["piece_id"])
+        from_xy = [int(data["from_x"]), int(data["from_y"])]
+        to_x, to_y = int(data["to_x"]), int(data["to_y"])
+        capture_mode = str(data.get("capture_mode", "occupy"))
+        move_stack = data.get("move_stack", True) is True
+    except (KeyError, TypeError, ValueError):
+        emit("move_rejected", {"reason": "BAD_FORMAT"})
+        return
+
+    winner = reason = None
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        state = room_states.get(room_code)
+        error = None
+        if not players or not state or state["status"] != "playing":
+            error = "NOT_PLAYING"
+        else:
+            color = "red" if players["red"] == user_id else "blue"
+            piece = game_engine.find_piece(state["pieces"], piece_id)
+            if state["turn"] != color:
+                error = "NOT_YOUR_TURN"
+            elif piece and [piece.x, piece.y] != from_xy:
+                error = "OUT_OF_SYNC"
+            else:
+                error, move = game_engine.apply_move(
+                    state["pieces"], color, piece_id, to_x, to_y, capture_mode, move_stack
+                )
+        if not error:
+            state["turn"] = game_engine.other_side(color)
+            move["no"] = len(state["moves"]) + 1
+            move["by"] = color
+            state["moves"].append(move)
+            winner, reason = game_engine.check_winner(state["pieces"], state["turn"])
+            if winner:
+                room_states.pop(room_code, None)
+            snapshot = dict(players)
+            next_turn = None if winner else state["turn"]
+
+    if error:
+        emit("move_rejected", {"reason": error})
+        return
+
+    emit("move_made", {"move": move, "next_turn": next_turn}, to=room_code)
+    if winner:
+        finish_game(room_code, snapshot, winner, reason)
 
 
 @socketio.on("request_leaderboard")
