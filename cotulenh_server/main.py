@@ -529,6 +529,13 @@ def handle_join_room(data):
         snapshot = dict(players)
         state = room_states.get(room_code)
         reconnected = bool(state) and state.get("waiting_reconnect", {}).pop(user_id, None) is not None
+        game = None
+        if state and state.get("status") == "playing":
+            game = {
+                "turn": state["turn"],
+                "move_count": len(state["moves"]),
+                "board": [asdict(p) for p in state["pieces"]],
+            }
 
     if color is None:
         emit("error", {"code": "ROOM_FULL", "message": "Phòng đã đủ người"})
@@ -536,7 +543,7 @@ def handle_join_room(data):
 
     join_room(room_code)
     user_rooms[request.sid] = room_code
-    emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color})
+    emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color, "game":game},)
     if reconnected:
         emit("player_reconnected", {"user_id": user_id}, to=room_code, include_self=False)
     else:
