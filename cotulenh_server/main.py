@@ -3,6 +3,7 @@ from pathlib import Path
 import secrets
 import string
 import threading
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -74,8 +75,14 @@ def generate_room_code():
 def create_room():
     user_id = int(get_jwt_identity())
 
-    if db.session.get(User, user_id) is None:
+    user = db.session.get(User, user_id)
+    if user is None:
         return jsonify({"error": "User not found"}), 404
+    if is_banned(user):
+        return jsonify({
+            "error": "Tài khoản đang bị cấm chơi do bỏ ván nhiều lần",
+            "banned_until": user.banned_until.isoformat(),
+        }), 403
 
     room = Room(
         room_code=generate_room_code(),
@@ -452,12 +459,48 @@ def handle_disconnect(reason=None):
 
 active_rooms = {}  
 
-def record_match(room_code, red_id, blue_id, result, bet=0):
+MAX_REPUTATION = 10
+ABANDON_PENALTIES = (2, 3, 4)
+BAN_DAYS = 7
+REPUTATION_AFTER_BAN = 6
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def is_banned(user):
+    return user.banned_until is not None and user.banned_until > utc_now()
+
+
+def update_reputation(winner, loser, abandoned):
+    winner.reputation = min(MAX_REPUTATION, winner.reputation + 1)
+    winner.abandon_streak = 0
+    if not abandoned:
+        loser.reputation = min(MAX_REPUTATION, loser.reputation + 1)
+        loser.abandon_streak = 0
+        return
+
+    penalty = ABANDON_PENALTIES[min(loser.abandon_streak, len(ABANDON_PENALTIES) - 1)]
+    loser.abandon_streak += 1
+    loser.reputation = max(0, loser.reputation - penalty)
+    if loser.reputation == 0:
+        loser.banned_until = utc_now() + timedelta(days=BAN_DAYS)
+        loser.reputation = REPUTATION_AFTER_BAN
+        loser.abandon_streak = 0
+
+def record_match(room_code, red_id, blue_id, result, bet=0, abandoned=False):
     red = db.session.get(User, red_id)
     blue = db.session.get(User, blue_id)
     red_elo = red.elo_rating or 1200
     blue_elo = blue.elo_rating or 1200
     delta_red, delta_blue = calculate_elo(red_elo, blue_elo, result)
+    if abandoned:
+        # Bên còn lại chỉ nhận 1/2 Elo thắng, bên bỏ ván bị trừ đủ
+        if result == "red_win":
+            delta_red = round(delta_red / 2)
+        else:
+            delta_blue = round(delta_blue / 2)
     red.elo_rating = max(100, red_elo + delta_red)
     blue.elo_rating = max(100, blue_elo + delta_blue)
 
@@ -474,6 +517,7 @@ def record_match(room_code, red_id, blue_id, result, bet=0):
         paid = min(bet, loser.coins or 0)
         winner.coins = (winner.coins or 0) + paid
         loser.coins = (loser.coins or 0) - paid
+        update_reputation(winner, loser, abandoned)
     else:
         red.draws = (red.draws or 0) + 1
         blue.draws = (blue.draws or 0) + 1
@@ -506,6 +550,15 @@ def handle_join_room(data):
     user_id = connected_users.get(request.sid)
     if user_id is None:
         emit("error", {"code": "AUTH_REQUIRED", "message": "Cần đăng nhập"})
+        return
+
+    user = db.session.get(User, user_id)
+    if is_banned(user):
+        emit("error", {
+            "code": "BANNED",
+            "message": "Tài khoản đang bị cấm chơi do bỏ ván nhiều lần",
+            "banned_until": user.banned_until.isoformat(),
+        })
         return
 
     room_code = str((data or {}).get("room_code") or "").strip()
@@ -584,7 +637,7 @@ def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="oppone
     if was_playing and forfeit:
         result = "blue_win" if user_id == snapshot["red"] else "red_win"
         delta_red, delta_blue = record_match(
-        room_code, snapshot["red"], snapshot["blue"], result
+        room_code, snapshot["red"], snapshot["blue"], result, abandoned=True
         )
         socketio.emit(
             "game_over",
