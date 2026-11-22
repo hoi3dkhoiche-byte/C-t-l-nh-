@@ -3,6 +3,7 @@ from pathlib import Path
 import secrets
 import string
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -116,6 +117,7 @@ def list_rooms():
                 "id": room.id,
                 "room_code": room.room_code,
                 "host_user_id": room.host_user_id,
+                "host_reputation": db.session.get(User, room.host_user_id).reputation,
                 "status": room.status,
                 "created_at": room.created_at.isoformat(),
             }
@@ -452,6 +454,7 @@ def handle_connect(auth=None):
 @socketio.on("disconnect")
 def handle_disconnect(reason=None):
     user_id = connected_users.pop(request.sid, None)
+    cancel_pending_join(request.sid)
     if not hold_seat(request.sid, user_id):
         remove_from_room(request.sid, user_id)
     print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
@@ -543,6 +546,11 @@ user_rooms = {}
 room_states = {}  # mã (trạng thái: waiting, ready, playing và danh sách người chơi đã sẵn sàng)
 
 RECONNECT_TIMEOUT = int(os.getenv("RECONNECT_TIMEOUT", "50"))
+LOW_REPUTATION = 6
+JOIN_REQUEST_TIMEOUT = int(os.getenv("JOIN_REQUEST_TIMEOUT", "20"))
+JOIN_COOLDOWN = 60
+pending_joins = {}   # room_code -> yêu cầu vào phòng đang chờ chủ phòng duyệt
+join_cooldowns = {}  # (room_code, user_id) -> thời điểm được xin vào lại
 
 
 @socketio.on("join_room")
@@ -576,11 +584,20 @@ def handle_join_room(data):
         )
         if user_id == players["red"]:
             color = "red"
-        elif players["blue"] in (None, user_id):
+        elif players["blue"] == user_id:
+            color = "blue"
+        elif players["blue"] is not None or room_code in pending_joins:
+            color = None
+        elif user.reputation < LOW_REPUTATION:
+            if join_cooldowns.get((room_code, user_id), 0) > time.monotonic():
+                color = "cooldown"
+            else:
+                token = object()
+                pending_joins[room_code] = {"user_id": user_id, "sid": request.sid, "token": token}
+                color = "pending"
+        else:
             players["blue"] = user_id
             color = "blue"
-        else:
-            color = None
         snapshot = dict(players)
         state = room_states.get(room_code)
         reconnected = bool(state) and state.get("waiting_reconnect", {}).pop(user_id, None) is not None
@@ -596,6 +613,24 @@ def handle_join_room(data):
         emit("error", {"code": "ROOM_FULL", "message": "Phòng đã đủ người"})
         return
 
+    if color == "cooldown":
+        emit("error", {"code": "JOIN_COOLDOWN", "message": "Vừa bị từ chối, thử lại sau"})
+        return
+    if color == "pending":
+        emit("join_pending", {"room_code": room_code, "timeout_seconds": JOIN_REQUEST_TIMEOUT})
+        emit(
+            "join_request",
+            {
+                "user_id": user_id,
+                "username": user.username,
+                "reputation": user.reputation,
+                "timeout_seconds": JOIN_REQUEST_TIMEOUT,
+            },
+            to=room_code,
+        )
+        socketio.start_background_task(expire_join_request, room_code, token)
+        return
+
     join_room(room_code)
     user_rooms[request.sid] = room_code
     emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color, "game":game},)
@@ -608,6 +643,70 @@ def handle_join_room(data):
             to=room_code,
             include_self=False,
         )
+
+def expire_join_request(room_code, token):
+    socketio.sleep(JOIN_REQUEST_TIMEOUT)
+    with rooms_lock:
+        pending = pending_joins.get(room_code)
+        if not pending or pending["token"] is not token:
+            return
+        pending_joins.pop(room_code)
+
+    socketio.emit(
+        "error",
+        {"code": "JOIN_REJECTED", "message": "Chủ phòng không phản hồi"},
+        to=pending["sid"],
+    )
+    socketio.emit("join_request_expired", {"user_id": pending["user_id"]}, to=room_code)
+
+
+def cancel_pending_join(sid):
+    with rooms_lock:
+        cancelled = [(code, p) for code, p in pending_joins.items() if p["sid"] == sid]
+        for code, _ in cancelled:
+            pending_joins.pop(code)
+
+    for code, pending in cancelled:
+        socketio.emit("join_request_cancelled", {"user_id": pending["user_id"]}, to=code)
+
+
+@socketio.on("answer_join")
+def handle_answer_join(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = user_rooms.get(request.sid)
+    accept = (data or {}).get("accept") is True
+
+    pending = None
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        if players and players["red"] == user_id and room_code in pending_joins:
+            pending = pending_joins.pop(room_code)
+            if accept:
+                players["blue"] = pending["user_id"]
+                snapshot = dict(players)
+            else:
+                join_cooldowns[(room_code, pending["user_id"])] = time.monotonic() + JOIN_COOLDOWN
+
+    if pending is None:
+        emit("error", {"code": "NO_JOIN_REQUEST", "message": "Không có yêu cầu nào đang chờ"})
+        return
+
+    if not accept:
+        socketio.emit(
+            "error",
+            {"code": "JOIN_REJECTED", "message": "Chủ phòng đã từ chối"},
+            to=pending["sid"],
+        )
+        return
+
+    join_room(room_code, sid=pending["sid"])
+    user_rooms[pending["sid"]] = room_code
+    socketio.emit(
+        "room_joined",
+        {"room_code": room_code, "players": snapshot, "your_color": "blue", "game": None},
+        to=pending["sid"],
+    )
+    emit("player_joined", {"user_id": pending["user_id"], "color": "blue"})
 
 def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="opponent_left"):
     if sid is not None:
