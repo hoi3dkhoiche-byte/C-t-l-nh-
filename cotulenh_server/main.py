@@ -3,6 +3,8 @@ from pathlib import Path
 import secrets
 import string
 import threading
+import time
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -14,6 +16,8 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required, ge
 
 from flask_bcrypt import Bcrypt
 from models import db, User, Room, Match
+from dataclasses import asdict
+import game_engine
 from pwdrs_routes import reset_bp 
 
 load_dotenv(Path(__file__).resolve().with_name(".env"))
@@ -72,8 +76,14 @@ def generate_room_code():
 def create_room():
     user_id = int(get_jwt_identity())
 
-    if db.session.get(User, user_id) is None:
+    user = db.session.get(User, user_id)
+    if user is None:
         return jsonify({"error": "User not found"}), 404
+    if is_banned(user):
+        return jsonify({
+            "error": "Tài khoản đang bị cấm chơi do bỏ ván nhiều lần",
+            "banned_until": user.banned_until.isoformat(),
+        }), 403
 
     room = Room(
         room_code=generate_room_code(),
@@ -107,6 +117,7 @@ def list_rooms():
                 "id": room.id,
                 "room_code": room.room_code,
                 "host_user_id": room.host_user_id,
+                "host_reputation": db.session.get(User, room.host_user_id).reputation,
                 "status": room.status,
                 "created_at": room.created_at.isoformat(),
             }
@@ -221,6 +232,8 @@ def get_current_user():
             "wins": user.wins or 0,
             "losses": user.losses or 0,
             "draws": user.draws or 0,
+            "reputation": user.reputation,
+            "banned_until": user.banned_until.isoformat() if user.banned_until else None,
         }
     }), 200
 
@@ -441,6 +454,7 @@ def handle_connect(auth=None):
 @socketio.on("disconnect")
 def handle_disconnect(reason=None):
     user_id = connected_users.pop(request.sid, None)
+    cancel_pending_join(request.sid)
     if not hold_seat(request.sid, user_id):
         remove_from_room(request.sid, user_id)
     print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
@@ -448,12 +462,48 @@ def handle_disconnect(reason=None):
 
 active_rooms = {}  
 
-def record_match(room_code, red_id, blue_id, result, bet=0):
+MAX_REPUTATION = 10
+ABANDON_PENALTIES = (2, 3, 4)
+BAN_DAYS = 7
+REPUTATION_AFTER_BAN = 6
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def is_banned(user):
+    return user.banned_until is not None and user.banned_until > utc_now()
+
+
+def update_reputation(winner, loser, abandoned):
+    winner.reputation = min(MAX_REPUTATION, winner.reputation + 1)
+    winner.abandon_streak = 0
+    if not abandoned:
+        loser.reputation = min(MAX_REPUTATION, loser.reputation + 1)
+        loser.abandon_streak = 0
+        return
+
+    penalty = ABANDON_PENALTIES[min(loser.abandon_streak, len(ABANDON_PENALTIES) - 1)]
+    loser.abandon_streak += 1
+    loser.reputation = max(0, loser.reputation - penalty)
+    if loser.reputation == 0:
+        loser.banned_until = utc_now() + timedelta(days=BAN_DAYS)
+        loser.reputation = REPUTATION_AFTER_BAN
+        loser.abandon_streak = 0
+
+def record_match(room_code, red_id, blue_id, result, bet=0, abandoned=False):
     red = db.session.get(User, red_id)
     blue = db.session.get(User, blue_id)
     red_elo = red.elo_rating or 1200
     blue_elo = blue.elo_rating or 1200
     delta_red, delta_blue = calculate_elo(red_elo, blue_elo, result)
+    if abandoned:
+        # Bên còn lại chỉ nhận 1/2 Elo thắng, bên bỏ ván bị trừ đủ
+        if result == "red_win":
+            delta_red = round(delta_red / 2)
+        else:
+            delta_blue = round(delta_blue / 2)
     red.elo_rating = max(100, red_elo + delta_red)
     blue.elo_rating = max(100, blue_elo + delta_blue)
 
@@ -470,6 +520,7 @@ def record_match(room_code, red_id, blue_id, result, bet=0):
         paid = min(bet, loser.coins or 0)
         winner.coins = (winner.coins or 0) + paid
         loser.coins = (loser.coins or 0) - paid
+        update_reputation(winner, loser, abandoned)
     else:
         red.draws = (red.draws or 0) + 1
         blue.draws = (blue.draws or 0) + 1
@@ -495,6 +546,11 @@ user_rooms = {}
 room_states = {}  # mã (trạng thái: waiting, ready, playing và danh sách người chơi đã sẵn sàng)
 
 RECONNECT_TIMEOUT = int(os.getenv("RECONNECT_TIMEOUT", "50"))
+LOW_REPUTATION = 6
+JOIN_REQUEST_TIMEOUT = int(os.getenv("JOIN_REQUEST_TIMEOUT", "20"))
+JOIN_COOLDOWN = 60
+pending_joins = {}   # room_code -> yêu cầu vào phòng đang chờ chủ phòng duyệt
+join_cooldowns = {}  # (room_code, user_id) -> thời điểm được xin vào lại
 
 
 @socketio.on("join_room")
@@ -502,6 +558,15 @@ def handle_join_room(data):
     user_id = connected_users.get(request.sid)
     if user_id is None:
         emit("error", {"code": "AUTH_REQUIRED", "message": "Cần đăng nhập"})
+        return
+
+    user = db.session.get(User, user_id)
+    if is_banned(user):
+        emit("error", {
+            "code": "BANNED",
+            "message": "Tài khoản đang bị cấm chơi do bỏ ván nhiều lần",
+            "banned_until": user.banned_until.isoformat(),
+        })
         return
 
     room_code = str((data or {}).get("room_code") or "").strip()
@@ -519,22 +584,56 @@ def handle_join_room(data):
         )
         if user_id == players["red"]:
             color = "red"
-        elif players["blue"] in (None, user_id):
+        elif players["blue"] == user_id:
+            color = "blue"
+        elif players["blue"] is not None or room_code in pending_joins:
+            color = None
+        elif user.reputation < LOW_REPUTATION:
+            if join_cooldowns.get((room_code, user_id), 0) > time.monotonic():
+                color = "cooldown"
+            else:
+                token = object()
+                pending_joins[room_code] = {"user_id": user_id, "sid": request.sid, "token": token}
+                color = "pending"
+        else:
             players["blue"] = user_id
             color = "blue"
-        else:
-            color = None
         snapshot = dict(players)
         state = room_states.get(room_code)
         reconnected = bool(state) and state.get("waiting_reconnect", {}).pop(user_id, None) is not None
+        game = None
+        if state and state.get("status") == "playing":
+            game = {
+                "turn": state["turn"],
+                "move_count": len(state["moves"]),
+                "board": [asdict(p) for p in state["pieces"]],
+            }
 
     if color is None:
         emit("error", {"code": "ROOM_FULL", "message": "Phòng đã đủ người"})
         return
 
+    if color == "cooldown":
+        emit("error", {"code": "JOIN_COOLDOWN", "message": "Vừa bị từ chối, thử lại sau"})
+        return
+    if color == "pending":
+        emit("join_pending", {"room_code": room_code, "timeout_seconds": JOIN_REQUEST_TIMEOUT})
+        emit(
+            "join_request",
+            {
+                "user_id": user_id,
+                "username": user.username,
+                "reputation": user.reputation,
+                "timeout_seconds": JOIN_REQUEST_TIMEOUT,
+            },
+            to=room_code,
+        )
+        socketio.start_background_task(expire_join_request, room_code, token)
+        return
+
     join_room(room_code)
     user_rooms[request.sid] = room_code
-    emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color})
+    emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color, "game":game},)
     if reconnected:
         emit("player_reconnected", {"user_id": user_id}, to=room_code, include_self=False)
     else:
@@ -544,6 +643,70 @@ def handle_join_room(data):
             to=room_code,
             include_self=False,
         )
+
+def expire_join_request(room_code, token):
+    socketio.sleep(JOIN_REQUEST_TIMEOUT)
+    with rooms_lock:
+        pending = pending_joins.get(room_code)
+        if not pending or pending["token"] is not token:
+            return
+        pending_joins.pop(room_code)
+
+    socketio.emit(
+        "error",
+        {"code": "JOIN_REJECTED", "message": "Chủ phòng không phản hồi"},
+        to=pending["sid"],
+    )
+    socketio.emit("join_request_expired", {"user_id": pending["user_id"]}, to=room_code)
+
+
+def cancel_pending_join(sid):
+    with rooms_lock:
+        cancelled = [(code, p) for code, p in pending_joins.items() if p["sid"] == sid]
+        for code, _ in cancelled:
+            pending_joins.pop(code)
+
+    for code, pending in cancelled:
+        socketio.emit("join_request_cancelled", {"user_id": pending["user_id"]}, to=code)
+
+
+@socketio.on("answer_join")
+def handle_answer_join(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = user_rooms.get(request.sid)
+    accept = (data or {}).get("accept") is True
+
+    pending = None
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        if players and players["red"] == user_id and room_code in pending_joins:
+            pending = pending_joins.pop(room_code)
+            if accept:
+                players["blue"] = pending["user_id"]
+                snapshot = dict(players)
+            else:
+                join_cooldowns[(room_code, pending["user_id"])] = time.monotonic() + JOIN_COOLDOWN
+
+    if pending is None:
+        emit("error", {"code": "NO_JOIN_REQUEST", "message": "Không có yêu cầu nào đang chờ"})
+        return
+
+    if not accept:
+        socketio.emit(
+            "error",
+            {"code": "JOIN_REJECTED", "message": "Chủ phòng đã từ chối"},
+            to=pending["sid"],
+        )
+        return
+
+    join_room(room_code, sid=pending["sid"])
+    user_rooms[pending["sid"]] = room_code
+    socketio.emit(
+        "room_joined",
+        {"room_code": room_code, "players": snapshot, "your_color": "blue", "game": None},
+        to=pending["sid"],
+    )
+    emit("player_joined", {"user_id": pending["user_id"], "color": "blue"})
 
 def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="opponent_left"):
     if sid is not None:
@@ -573,7 +736,7 @@ def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="oppone
     if was_playing and forfeit:
         result = "blue_win" if user_id == snapshot["red"] else "red_win"
         delta_red, delta_blue = record_match(
-        room_code, snapshot["red"], snapshot["blue"], result
+        room_code, snapshot["red"], snapshot["blue"], result, abandoned=True
         )
         socketio.emit(
             "game_over",
@@ -662,15 +825,120 @@ def handle_player_ready(data=None):
         started = None not in both and state["ready"] >= both
         if started:
             state["status"] = "playing"
+            state["turn"] = "red"
+            state["moves"] = []
+            state["pieces"] = game_engine.initial_pieces()
+            board = [asdict(p) for p in state["pieces"]]
+            turn_token = state["turn_token"] = object()
         snapshot = dict(players)
 
     emit("player_ready", {"user_id": user_id}, to=room_code)
     if started:
         emit(
             "game_started",
-            {"room_code": room_code, "players": snapshot, "first_turn": "red", "state": None},
+            {
+                "room_code": room_code,
+                "players": snapshot,
+                "first_turn": "red",
+                "turn_seconds": TURN_SECONDS,
+                "board": board,
+            },
             to=room_code,
         )
+        socketio.start_background_task(turn_timeout, room_code, turn_token)
+
+TURN_SECONDS = int(os.getenv("TURN_SECONDS", "45"))
+
+
+def turn_timeout(room_code, token):
+    socketio.sleep(TURN_SECONDS)
+    with rooms_lock:
+        state = room_states.get(room_code)
+        if not state or state.get("turn_token") is not token:
+            return
+        skipped = state["turn"]
+        state["turn"] = game_engine.other_side(skipped)
+        new_token = state["turn_token"] = object()
+        next_turn = state["turn"]
+
+    socketio.emit("turn_timeout", {"skipped": skipped, "next_turn": next_turn}, to=room_code)
+    socketio.start_background_task(turn_timeout, room_code, new_token)
+
+def finish_game(room_code, players, winner, reason):
+    result = "red_win" if winner == "red" else "blue_win"
+    delta_red, delta_blue = record_match(room_code, players["red"], players["blue"], result)
+    socketio.emit(
+        "game_over",
+        {
+            "result": result,
+            "winner_id": players[winner],
+            "reason": reason,
+            "elo_change": {"red": delta_red, "blue": delta_blue},
+        },
+        to=room_code,
+    )
+
+
+@socketio.on("make_move")
+def handle_make_move(data=None):
+    user_id = connected_users.get(request.sid)
+    room_code = user_rooms.get(request.sid)
+    if user_id is None or room_code is None:
+        emit("error", {"code": "NOT_IN_ROOM", "message": "Bạn chưa vào phòng"})
+        return
+
+    data = data or {}
+    try:
+        piece_id = str(data["piece_id"])
+        from_xy = [int(data["from_x"]), int(data["from_y"])]
+        to_x, to_y = int(data["to_x"]), int(data["to_y"])
+        capture_mode = str(data.get("capture_mode", "occupy"))
+        move_stack = data.get("move_stack", True) is True
+    except (KeyError, TypeError, ValueError):
+        emit("move_rejected", {"reason": "BAD_FORMAT"})
+        return
+
+    winner = reason = None
+    with rooms_lock:
+        players = active_rooms.get(room_code)
+        state = room_states.get(room_code)
+        error = None
+        if not players or not state or state["status"] != "playing":
+            error = "NOT_PLAYING"
+        else:
+            color = "red" if players["red"] == user_id else "blue"
+            piece = game_engine.find_piece(state["pieces"], piece_id)
+            if state["turn"] != color:
+                error = "NOT_YOUR_TURN"
+            elif piece and [piece.x, piece.y] != from_xy:
+                error = "OUT_OF_SYNC"
+            else:
+                error, move = game_engine.apply_move(
+                    state["pieces"], color, piece_id, to_x, to_y, capture_mode, move_stack
+                )
+        if not error:
+            state["turn"] = game_engine.other_side(color)
+            move["no"] = len(state["moves"]) + 1
+            move["by"] = color
+            state["moves"].append(move)
+            winner, reason = game_engine.check_winner(state["pieces"], state["turn"])
+            if winner:
+                room_states.pop(room_code, None)
+            else:
+                turn_token = state["turn_token"] = object()
+            snapshot = dict(players)
+            next_turn = None if winner else state["turn"]
+
+    if error:
+        emit("move_rejected", {"reason": error})
+        return
+
+    emit("move_made", {"move": move, "next_turn": next_turn}, to=room_code)
+    if winner:
+        finish_game(room_code, snapshot, winner, reason)
+    else:
+        socketio.start_background_task(turn_timeout, room_code, turn_token)
+
 
 
 @socketio.on("request_leaderboard")
