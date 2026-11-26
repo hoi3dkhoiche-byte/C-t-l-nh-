@@ -1,21 +1,29 @@
-# Chạy: docker compose up --build   (lần đầu mất vài phút để tải image)
+# =============================================================================
+# DOCKER COMPOSE DÀNH CHO MÔI TRƯỜNG LOCAL / DEVELOPMENT (Kèm MySQL 8.4 nội bộ)
+# Chạy: docker compose up --build -d
+# (Nếu triển khai Production kết nối AWS RDS, dùng file: docker-compose.rds.yml)
+# =============================================================================
 services:
-  # ---------- Database MySQL ----------
+  # ---------- Database MySQL nội bộ ----------
   db:
-    image: mysql:8.4                          
-    restart: unless-stopped                   
-    environment:                             
-      MYSQL_DATABASE: cotulenh
-      MYSQL_USER: cotulenh
-      MYSQL_PASSWORD: ${DB_PASSWORD:-cotulenh123}          
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-cotulenh}
+      MYSQL_USER: ${DB_USER:-cotulenh}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-cotulenh123}
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root123}
     command:
       - --innodb-buffer-pool-size=128M
       - --innodb-log-buffer-size=16M
       - --max-connections=50
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "127.0.0.1:${DB_PORT:-3306}:3306"
     volumes:
-      - db_data:/var/lib/mysql              
-    healthcheck:                             
+      - db_data:/var/lib/mysql
+    healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s
       timeout: 5s
@@ -24,17 +32,26 @@ services:
 
   # ---------- Server Flask ----------
   server:
-    build: .                                 
+    build: .
     restart: unless-stopped
-    env_file: .env                            
+    env_file:
+      - path: .env
+        required: false
     environment:
-      # Nếu trong .env có DATABASE_URL (ví dụ AWS RDS) thì dùng giá trị đó; nếu không thì dùng DB nội bộ của Docker
-      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://cotulenh:${DB_PASSWORD:-cotulenh123}@db:3306/cotulenh}
+      APP_ENV: development
+      DATABASE_URL: mysql+pymysql://${DB_USER:-cotulenh}:${DB_PASSWORD:-cotulenh123}@db:3306/${DB_NAME:-cotulenh}
+      DB_SSL_MODE: DISABLED
     ports:
-      - "5000:5000"                           
+      - "5000:5000"
     depends_on:
       db:
-        condition: service_healthy           
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/db-health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
 
 volumes:
   db_data:

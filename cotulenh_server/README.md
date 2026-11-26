@@ -1,13 +1,28 @@
 # Server Cờ Tư Lệnh
 
-## Cài đặt (lần đầu)
-    python -m venv .venv
-    .venv\Scripts\activate
-    python -m pip install -r requirements.txt
+## 1. Chạy trực tiếp trên máy Local (SQLite hoặc MySQL)
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env            # Mặc định cấu hình sẵn SQLite local hợp lệ
+flask --app main db upgrade     # Nâng DB lên migration mới nhất (bắt buộc trước khi chạy)
+python main.py                  # Chạy tại http://127.0.0.1:5000
+```
 
-## Chạy
-    python app.py           # server chạy tại http://127.0.0.1:5000
+## 2. Chạy Local bằng Docker Compose (Server + MySQL 8.4 nội bộ)
+```bash
+docker compose up --build -d
+```
 
-## API đã có
-- POST /api/auth/login     {username, password}
-- POST /api/auth/register  {username, password, email}
+## 3. Triển khai Production kết nối AWS RDS MySQL
+1. Cập nhật `.env` với `APP_ENV=production`, `JWT_SECRET_KEY` (>= 32 ký tự), `DATABASE_URL=mysql+pymysql://...` và `DB_SSL_MODE=VERIFY_IDENTITY`.
+2. Nếu chạy ngoài Docker, tải chứng chỉ CA của AWS RDS về `certs/global-bundle.pem` từ `https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem` (trong Docker image đã tích hợp sẵn tại `/etc/ssl/certs/aws-rds-global-bundle.pem`).
+3. Khởi chạy file Compose tách biệt không kèm MySQL nội bộ:
+```bash
+docker compose -f docker-compose.rds.yml up --build -d
+```
+
+## 4. Kiểm tra trạng thái kết nối
+- `GET /health`: Trạng thái server (`200 OK`)
+- `GET /db-health`: Trạng thái kết nối DB (`200 OK` hoặc `503 Service Unavailable` có kiểm soát)

@@ -1,16 +1,20 @@
 import os
 from pathlib import Path
 import secrets
+import ssl
 import string
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import certifi
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 
 
@@ -20,31 +24,209 @@ from dataclasses import asdict
 import game_engine
 from pwdrs_routes import reset_bp 
 
-load_dotenv(Path(__file__).resolve().with_name(".env"))
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
+DEV_ENVIRONMENTS = {"development", "dev", "local", "test", "testing"}
+PROD_ENVIRONMENTS = {"production", "prod"}
+DEV_FALLBACK_JWT_SECRET = "cotulenh-dev-jwt-secret-key-min-32-chars-replace-in-production"
+PLACEHOLDER_JWT_SECRETS = {
+    DEV_FALLBACK_JWT_SECRET,
+    "doi-thanh-chuoi-ngau-nhien-it-nhat-32-ky-tu",
+    "cotulenh-super-secret-key-production-32-chars",
+}
+PLACEHOLDER_DB_MARKERS = (
+    "<RDS_ENDPOINT>",
+    "<DB_USER>",
+    "<DB_PASSWORD>",
+    "rds-cotulenh-endpoint.amazonaws.com",
+)
+DEFAULT_RDS_CA_CANDIDATES = (
+    BASE_DIR / "certs" / "global-bundle.pem",
+    Path("/etc/ssl/certs/aws-rds-global-bundle.pem"),
+)
+
+
+def resolve_app_env(env=os.environ) -> tuple[str, bool]:
+    """Xác định môi trường chạy (local/development hay production)."""
+    raw_env = (env.get("APP_ENV") or env.get("FLASK_ENV") or "development").strip().lower()
+    if raw_env in PROD_ENVIRONMENTS:
+        return raw_env, True
+    if raw_env in DEV_ENVIRONMENTS:
+        return raw_env, False
+    raise RuntimeError(
+        f"Giá trị APP_ENV='{raw_env}' không hợp lệ. "
+        "Chỉ chấp nhận: development, local, test, production."
+    )
+
+
+def _env_int(env, key: str, default: int, min_value: int = 1) -> int:
+    raw = (env.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"Biến môi trường {key}='{raw}' phải là số nguyên.") from exc
+    if value < min_value:
+        raise RuntimeError(f"Biến môi trường {key}={value} phải >= {min_value}.")
+    return value
+
+
+def resolve_jwt_secret(env=os.environ, *, is_production: bool = False) -> str:
+    """Lấy JWT_SECRET_KEY; bắt buộc khóa thật tối thiểu 32 ký tự khi chạy production."""
+    secret = (env.get("JWT_SECRET_KEY") or "").strip()
+    if is_production:
+        if not secret or secret in PLACEHOLDER_JWT_SECRETS or len(secret) < 32:
+            raise RuntimeError(
+                "APP_ENV=production bắt buộc phải cấu hình JWT_SECRET_KEY bảo mật "
+                "(tối thiểu 32 ký tự và không dùng giá trị mẫu)."
+            )
+        return secret
+    return secret or DEV_FALLBACK_JWT_SECRET
+
+
+def build_mysql_ssl_context(env=os.environ, *, is_production: bool = False) -> ssl.SSLContext | None:
+    """
+    Khởi tạo SSLContext cho kết nối MySQL / AWS RDS theo DB_SSL_MODE:
+    - DISABLED: Tắt TLS (mặc định cho MySQL local/Docker)
+    - REQUIRED: Bật mã hóa TLS nhưng không xác minh CA/hostname
+    - VERIFY_CA: Bật TLS và xác minh chứng chỉ CA (DB_SSL_CA)
+    - VERIFY_IDENTITY: Bật TLS + xác minh chứng chỉ CA + kiểm tra khớp hostname RDS (mặc định ở production)
+    """
+    default_mode = "VERIFY_IDENTITY" if is_production else "DISABLED"
+    mode = (env.get("DB_SSL_MODE") or default_mode).strip().upper()
+
+    if mode in ("DISABLED", "OFF", "FALSE", "0"):
+        return None
+
+    if mode == "REQUIRED":
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    if mode not in ("VERIFY_CA", "VERIFY_IDENTITY"):
+        raise RuntimeError(
+            f"DB_SSL_MODE='{mode}' không hợp lệ. "
+            "Chỉ hỗ trợ: DISABLED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY."
+        )
+
+    raw_ca = (env.get("DB_SSL_CA") or "").strip()
+    ca_file: Path | None = None
+    if raw_ca:
+        candidate = Path(raw_ca)
+        if not candidate.is_absolute():
+            candidate = candidate if candidate.exists() else (BASE_DIR / candidate)
+        if not candidate.is_file():
+            raise RuntimeError(
+                f"Không tìm thấy file chứng chỉ CA tại DB_SSL_CA='{raw_ca}'. "
+                "Tải bundle của AWS RDS tại: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
+            )
+        ca_file = candidate
+    else:
+        for candidate in DEFAULT_RDS_CA_CANDIDATES:
+            if candidate.is_file():
+                ca_file = candidate
+                break
+
+    if ca_file is None:
+        if is_production:
+            raise RuntimeError(
+                f"Chế độ DB_SSL_MODE={mode} trong production yêu cầu chứng chỉ CA cho RDS. "
+                "Hãy đặt biến môi trường DB_SSL_CA trỏ tới file global-bundle.pem của AWS RDS."
+            )
+        ca_file = Path(certifi.where())
+
+    ctx = ssl.create_default_context(cafile=str(ca_file))
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        # Tránh lỗi strict X509 trên Python 3.13+ với chứng chỉ trung gian của MySQL/RDS
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = mode == "VERIFY_IDENTITY"
+    return ctx
+
+
+def build_database_config(env=os.environ) -> tuple[str, dict]:
+    """
+    Xây dựng (SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS):
+    - Local/dev: cho phép fallback sang SQLite nếu chưa khai báo DATABASE_URL.
+    - Production: bắt buộc có DATABASE_URL hợp lệ (MySQL/RDS), cấm fallback âm thầm sang SQLite.
+    """
+    _, is_production = resolve_app_env(env)
+    database_url = (env.get("DATABASE_URL") or "").strip()
+
+    if any(marker in database_url for marker in PLACEHOLDER_DB_MARKERS):
+        raise RuntimeError(
+            "DATABASE_URL đang chứa giá trị mẫu (placeholder). "
+            "Vui lòng cấu hình URL database thực tế trong file .env."
+        )
+
+    if not database_url:
+        if is_production:
+            raise RuntimeError(
+                "APP_ENV=production bắt buộc phải cấu hình biến môi trường DATABASE_URL "
+                "(ví dụ mysql+pymysql://...); không cho phép tự động chạy SQLite."
+            )
+        database_url = "sqlite:///cotulenh.db"
+
+    try:
+        parsed_url = make_url(database_url)
+    except ArgumentError as exc:
+        raise RuntimeError(f"Định dạng DATABASE_URL không hợp lệ: {exc}") from exc
+
+    backend = parsed_url.get_backend_name()
+    if is_production and backend == "sqlite":
+        raise RuntimeError(
+            "APP_ENV=production không cho phép sử dụng SQLite. "
+            "Hãy trỏ DATABASE_URL tới MySQL / AWS RDS."
+        )
+
+    connect_timeout = _env_int(env, "DB_CONNECT_TIMEOUT", 10)
+
+    if backend == "sqlite":
+        engine_options: dict = {
+            "pool_pre_ping": True,
+            "connect_args": {"timeout": connect_timeout},
+        }
+        return database_url, engine_options
+
+    engine_options = {
+        "pool_pre_ping": True,
+        "pool_recycle": _env_int(env, "DB_POOL_RECYCLE", 280),
+        "pool_size": _env_int(env, "DB_POOL_SIZE", 10),
+        "max_overflow": _env_int(env, "DB_MAX_OVERFLOW", 20, min_value=0),
+        "pool_timeout": _env_int(env, "DB_POOL_TIMEOUT", 10),
+    }
+
+    if backend == "mysql":
+        connect_args: dict = {
+            "connect_timeout": connect_timeout,
+            "read_timeout": _env_int(env, "DB_READ_TIMEOUT", 30),
+            "write_timeout": _env_int(env, "DB_WRITE_TIMEOUT", 30),
+            "charset": "utf8mb4",
+        }
+        ssl_ctx = build_mysql_ssl_context(env, is_production=is_production)
+        if ssl_ctx is not None:
+            connect_args["ssl"] = ssl_ctx
+        engine_options["connect_args"] = connect_args
+
+    return database_url, engine_options
+
+
+APP_ENV, IS_PRODUCTION = resolve_app_env()
 
 app = Flask(__name__)
-
-# Cấu hình JWT (có fallback an toàn khi chưa điền env)
-app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY") or "cotulenh-dev-jwt-secret-key-min-32-chars-replace-in-production"
+app.config["JWT_SECRET_KEY"] = resolve_jwt_secret(is_production=IS_PRODUCTION)
 jwt = JWTManager(app)
 bcrypt = Bcrypt(app)
 
-# Cấu hình Database (Hỗ trợ AWS RDS và Local)
-database_url = os.getenv("DATABASE_URL")
-if not database_url:
-    # Fallback cho chạy test cục bộ nếu chưa set DATABASE_URL
-    database_url = "sqlite:///cotulenh.db"
-
+database_url, engine_options = build_database_config()
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
-# Cấu hình Pool tối ưu cho AWS RDS:
-# - pool_pre_ping: Tự kiểm tra kết nối còn sống trước khi query (tránh lỗi "MySQL server has gone away")
-# - pool_recycle: Tự làm mới kết nối sau 280 giây (tránh bị AWS RDS / NAT timeout cắt ngang)
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_pre_ping": True,
-    "pool_recycle": 280,
-}
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options
 
 db.init_app(app)
 migrate = Migrate(app, db)
@@ -52,15 +234,28 @@ app.register_blueprint(reset_bp)
 socketio = SocketIO(app, async_mode="threading")
 
 
-@app.get("/health")  #Trạng thái server
+@app.get("/health")  # Trạng thái server
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "env": APP_ENV})
 
 
-@app.get("/db-health") #Trạng thái database trên server
+@app.get("/db-health")  # Trạng thái database trên server
 def db_health():
-    db.session.execute(text("SELECT 1"))
-    return jsonify({"database": "connected"})
+    try:
+        db.session.execute(text("SELECT 1"))
+        return jsonify({
+            "status": "ok",
+            "database": "connected",
+            "backend": db.engine.url.get_backend_name(),
+        }), 200
+    except (SQLAlchemyError, OSError) as exc:
+        db.session.rollback()
+        app.logger.error("Database health check failed: %s", exc)
+        return jsonify({
+            "status": "error",
+            "database": "disconnected",
+            "error": "Không thể kết nối tới cơ sở dữ liệu",
+        }), 503
 
 def generate_room_code():
     alphabet = string.ascii_uppercase + string.digits
@@ -949,4 +1144,6 @@ def handle_request_leaderboard():
 
 
 if __name__ == "__main__":
-    socketio.run(app, host="127.0.0.1", port=5000, debug=True)
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "5000"))
+    socketio.run(app, host=host, port=port, debug=not IS_PRODUCTION)
