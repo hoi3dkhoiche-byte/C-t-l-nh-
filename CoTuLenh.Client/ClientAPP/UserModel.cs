@@ -17,6 +17,12 @@ public class UserModel
     public int Losses { get; set; } = 0;
     public int Draws { get; set; } = 0;
 
+    [JsonPropertyName("reputation")]
+    public int Reputation { get; set; } = 10;
+
+    [JsonPropertyName("banned_until")]
+    public DateTime? BannedUntil { get; set; }
+
     [JsonPropertyName("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.Now;
 

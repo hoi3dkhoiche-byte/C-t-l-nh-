@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 
 namespace ClientAPP;
@@ -12,9 +11,11 @@ public partial class LoginForm : BaseForm
         InitializeComponent();
     }
 
-    // 1. Tự động đọc thông tin tài khoản đã ghi nhớ khi form vừa mở lên
+    // 1. Tự động đọc địa chỉ Server LAN và tài khoản đã ghi nhớ khi form vừa mở lên
     private void Form1_Load(object sender, EventArgs e)
     {
+        txtServerUrl.Text = ServerConfig.BaseUrl;
+
         try
         {
             if (File.Exists(rememberFilePath))
@@ -36,10 +37,25 @@ public partial class LoginForm : BaseForm
         }
     }
 
-    // 2. Thêm từ khóa 'async' vào đây để dùng được await
+    private bool ApplyServerUrlInput()
+    {
+        if (!ServerConfig.TrySetBaseUrl(txtServerUrl.Text, out string err))
+        {
+            lblErrorMessage.Text = err;
+            txtServerUrl.Focus();
+            return false;
+        }
+
+        txtServerUrl.Text = ServerConfig.BaseUrl;
+        return true;
+    }
+
+    // 2. Đăng nhập và khởi tạo kết nối Socket.IO xác thực JWT
     private async void btnLogin_Click(object sender, EventArgs e)
     {
         lblErrorMessage.Text = "";
+
+        if (!ApplyServerUrlInput()) return;
 
         string username = txtUsername.Text.Trim();
         string password = txtPassword.Text;
@@ -79,32 +95,25 @@ public partial class LoginForm : BaseForm
                     string json = JsonSerializer.Serialize(data);
                     File.WriteAllText(rememberFilePath, json);
                 }
-                else
+                else if (File.Exists(rememberFilePath))
                 {
-                    if (File.Exists(rememberFilePath))
-                    {
-                        File.Delete(rememberFilePath);
-                    }
+                    File.Delete(rememberFilePath);
                 }
 
-                MessageBox.Show(result.Message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                
-                // Khởi tạo phiên người dùng từ dữ liệu thật trả về từ máy chủ
                 var currentUser = result.User ?? new UserModel
                 {
                     Username = username,
                     Email = username.Contains("@") ? username : $"{username}@cotulenh.vn",
                     Coins = 0,
                     EloRating = 1200,
-                    Wins = 0,
-                    Losses = 0,
-                    Draws = 0
+                    Reputation = 10
                 };
 
                 SessionService.Instance.SetCurrentUser(currentUser, result.Token);
+                GameApiService.Instance.CacheUser(currentUser.Id, currentUser.Username);
 
-                // Khởi động kết nối Realtime Socket.IO
-                _ = RealtimeService.Instance.ConnectAsync();
+                // Kết nối Socket.IO kèm JWT token của tài khoản vừa đăng nhập
+                await RealtimeService.Instance.ConnectAsync(forceReconnect: true);
 
                 var lobby = new LobbyForm();
                 lobby.Show();
@@ -138,6 +147,8 @@ public partial class LoginForm : BaseForm
 
     private void btnRegister_Click(object sender, EventArgs e)
     {
+        if (!ApplyServerUrlInput()) return;
+
         RegisterForm registerForm = new RegisterForm();
         registerForm.FormClosed += (s, args) => this.Show();
         registerForm.Show();
@@ -146,6 +157,8 @@ public partial class LoginForm : BaseForm
 
     private void lnkForgotPassword_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
     {
+        if (!ApplyServerUrlInput()) return;
+
         ForgotPasswordForm forgotForm = new ForgotPasswordForm();
         forgotForm.FormClosed += (s, args) => this.Show();
         forgotForm.Show();
@@ -156,14 +169,9 @@ public partial class LoginForm : BaseForm
     private void label1_Click(object sender, EventArgs e) { }
     private void chkRememberMe_CheckedChanged(object sender, EventArgs e) { }
     private void lblErrorMessage_Click(object sender, EventArgs e) { }
-
-    private void lblTitle_Click(object sender, EventArgs e)
-    {
-
-    }
+    private void lblTitle_Click(object sender, EventArgs e) { }
 }
 
-// 3. Class lưu dữ liệu ghi nhớ đăng nhập
 public class RememberData
 {
     public string Username { get; set; } = "";
