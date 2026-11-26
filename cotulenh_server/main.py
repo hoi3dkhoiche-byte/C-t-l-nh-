@@ -949,4 +949,6 @@ def handle_request_leaderboard():
 
 
 if __name__ == "__main__":
-    socketio.run(app, host="127.0.0.1", port=5000, debug=True)
+    host = os.getenv("HOST", "127.0.0.1")
+    debug = os.getenv("FLASK_DEBUG", "0") == "1"
+    socketio.run(app, host=host, port=5000, debug=debug, allow_unsafe_werkzeug=True)
