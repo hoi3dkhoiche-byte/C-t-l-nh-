@@ -11,9 +11,10 @@
 4. [Luật chơi Cờ Tư Lệnh](#-luật-chơi-cờ-tư-lệnh)
 5. [Cấu trúc thư mục](#-cấu-trúc-thư-mục)
 6. [Hướng dẫn cài đặt & Khởi chạy](#-hướng-dẫn-cài-đặt--khởi-chạy)
-   - [Khởi chạy Server (Python Flask)](#1-khởi-chạy-server-python-flask)
-   - [Khởi chạy bằng Docker Compose](#2-khởi-chạy-bằng-docker-compose)
-   - [Khởi chạy Client (C# WinForms .NET 9)](#3-khởi-chạy-client-c-winforms-net-9)
+   - [Khởi chạy Server Local (Python Flask)](#1-khởi-chạy-server-local-python-flask)
+   - [Khởi chạy bằng Docker Compose (MySQL Local)](#2-khởi-chạy-bằng-docker-compose-mysql-local)
+   - [Triển khai Production với AWS RDS MySQL](#3-triển-khai-production-với-aws-rds-mysql)
+   - [Khởi chạy Client (C# WinForms .NET 9)](#4-khởi-chạy-client-c-winforms-net-9)
 7. [Tài liệu API & Socket.IO Events](#-tài-liệu-api--socketio-events)
 8. [Cấu hình biến môi trường (.env)](#-cấu-hình-biến-môi-trường-env)
 
@@ -140,11 +141,13 @@ C-t-l-nh-/
 │   ├── mail_service.py              # Dịch vụ gửi email OTP qua Gmail SMTP
 │   ├── pwdrs_routes.py              # Blueprint API quên mật khẩu
 │   ├── requirements.txt             # Danh sách thư viện Python
-│   ├── Dockerfile                   # Docker build file cho server Flask
-│   ├── docker-compose.yml           # Khởi chạy cụm Server Flask + MySQL 8.4
-│   ├── .env.example                 # File mẫu cấu hình biến môi trường
+│   ├── Dockerfile                   # Docker build file (tích hợp CA bundle AWS RDS & auto-migrate)
+│   ├── docker-compose.yml           # Compose cho môi trường Local (Server Flask + MySQL 8.4 nội bộ)
+│   ├── docker-compose.rds.yml       # Compose cho Production (Chỉ chạy Server kết nối AWS RDS)
+│   ├── .env.example                 # File mẫu cấu hình biến môi trường (chuẩn hóa local & hướng dẫn RDS)
 │   ├── migrations/                  # Script migration cơ sở dữ liệu (Alembic)
 │   └── testcase/                    # Kịch bản kiểm thử tự động
+│       ├── test_db_config_and_migrations.py # Kiểm thử tách env, TLS RDS, pool, /db-health & migrations
 │       ├── manual_socket_move.py    # Test di chuyển quân qua Socket
 │       ├── manual_socket_timer.py   # Test đồng hồ đếm ngược lượt đi
 │       ├── manual_socket_resync.py  # Test khôi phục trạng thái khi rớt mạng
@@ -158,7 +161,7 @@ C-t-l-nh-/
 
 ## 🚀 HƯỚNG DẪN CÀI ĐẶT & KHỞI CHẠY
 
-### 1. Khởi chạy Server (Python Flask)
+### 1. Khởi chạy Server Local (Python Flask)
 
 #### Yêu cầu:
 * Python 3.12 trở lên.
@@ -175,38 +178,71 @@ python -m venv .venv
 # Trên Linux/macOS:
 source .venv/bin/activate
 
-# 3. Cài đặt các gói phụ thuộc
+# 3. Cài đặt các gói phụ thuộc (bao gồm PyMySQL & cryptography)
 pip install -r requirements.txt
 
-# 4. Tạo file cấu hình môi trường
+# 4. Tạo file cấu hình môi trường (mặc định cấu hình sẵn SQLite local hợp lệ)
 cp .env.example .env
-# Chỉnh sửa thông tin trong .env (hoặc để mặc định chạy SQLite cho local test)
 
-# 5. Cập nhật Cơ sở dữ liệu (Migration)
+# 5. BẮT BUỘC: Chạy nâng cấp Cơ sở dữ liệu lên migration mới nhất trước khi mở server
 flask --app main db upgrade
 
 # 6. Khởi chạy Server
 python main.py
 ```
-> Server sẽ chạy tại địa chỉ: `http://127.0.0.1:5000`
+> Server sẽ chạy tại địa chỉ: `http://127.0.0.1:5000` (Kiểm tra tại `/health` và `/db-health`).
 
 ---
 
-### 2. Khởi chạy bằng Docker Compose
+### 2. Khởi chạy bằng Docker Compose (MySQL Local)
 
-Dành cho môi trường đóng gói gồm cả Web Server và Database MySQL:
+Dành cho phát triển & kiểm thử cục bộ gồm cả Web Server và MySQL 8.4 nội bộ:
 
 ```bash
 cd cotulenh_server
 
-# Chạy cụm container (tự động build image và khởi động MySQL)
+# Chạy cụm container (tự động khởi động MySQL 8.4, chạy flask db upgrade và bật Gunicorn)
 docker compose up --build -d
 ```
-> Server sẽ lắng nghe tại port `5000` và kết nối với cơ sở dữ liệu `cotulenh` trên MySQL container.
+> Server lắng nghe tại port `5000`, kết nối MySQL container (`db:3306`, đồng thời mở `127.0.0.1:3306` để kiểm tra từ máy host nếu cần).
 
 ---
 
-### 3. Khởi chạy Client (C# WinForms .NET 9)
+### 3. Triển khai Production với AWS RDS MySQL
+
+Khi triển khai lên Cloud (EC2 / ECS), hệ thống tách riêng cấu hình qua [`docker-compose.rds.yml`](cotulenh_server/docker-compose.rds.yml) — **chỉ khởi chạy container `server` và không bật MySQL nội bộ**:
+
+1. **Mạng & Bảo mật AWS:**
+   * Tạo AWS RDS **MySQL 8.x** đặt trong Private Subnet cùng VPC với máy chủ chạy backend.
+   * Cấu hình **RDS Security Group**: chỉ mở Inbound port `3306` từ Security Group của máy chủ ứng dụng (không mở `0.0.0.0/0`).
+2. **Cấu hình biến môi trường trên máy chủ Production (`.env` hoặc file riêng như `.env.rds`):**
+   ```env
+   APP_ENV=production
+   JWT_SECRET_KEY=<chuoi_ngau_nhien_bao_mat_toi_thieu_32_ky_tu>
+   # Khuyên dùng bộ biến rời DB_* để mật khẩu chứa ký tự đặc biệt (@, :, /, ?, #, %) được mã hóa an toàn bằng URL.create:
+   DB_HOST=<RDS_ENDPOINT>
+   DB_PORT=3306
+   DB_NAME=cotulenh
+   DB_USER=<DB_USER>
+   DB_PASSWORD=<DB_PASSWORD>
+   DB_SSL_MODE=VERIFY_IDENTITY
+   # LƯU Ý: Khi chạy bằng Docker, KHÔNG đặt DB_SSL_CA=certs/global-bundle.pem để container tự dùng CA tích hợp sẵn
+   # (/etc/ssl/certs/aws-rds-global-bundle.pem). Chỉ đặt DB_SSL_CA khi chạy Python trực tiếp ngoài Docker trên máy host.
+   ```
+   > **Cơ chế an toàn (`Fail-fast`):** Khi `APP_ENV=production`, server bắt buộc có kết nối MySQL/RDS và `JWT_SECRET_KEY` hợp lệ; tự động từ chối mọi tham số TLS mâu thuẫn trên URL (như `?ssl_disabled=true`, `?ssl_verify_cert=0`).
+   > **Lưu ý dữ liệu:** Thay đổi nơi kết nối sang RDS sẽ tạo cấu trúc bảng mới trên RDS qua Alembic; nếu muốn giữ dữ liệu SQLite cũ cần xuất/nhập dữ liệu riêng.
+3. **Khởi chạy Production Compose:**
+   ```bash
+   cd cotulenh_server
+   # Dùng file .env mặc định:
+   docker compose -f docker-compose.rds.yml up --build -d
+   # Hoặc chỉ định file cấu hình riêng thống nhất qua --env-file:
+   docker compose --env-file .env.rds -f docker-compose.rds.yml up --build -d
+   ```
+
+---
+
+### 4. Khởi chạy Client (C# WinForms .NET 9)
 
 #### Yêu cầu:
 * [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) hoặc Visual Studio 2022 (v17.12+).
@@ -231,6 +267,8 @@ dotnet run
 ### REST APIs chính:
 | Phương thức | Đường dẫn | Xác thực | Mô tả |
 | :--- | :--- | :---: | :--- |
+| `GET` | `/health` | Không | Kiểm tra trạng thái sống của Web Server (`200 OK`) |
+| `GET` | `/db-health` | Không | Kiểm tra kết nối Database (`200 OK` hoặc `503` có kiểm soát khi mất kết nối) |
 | `POST` | `/api/auth/register` | Không | Đăng ký tài khoản mới (`username`, `password`, `email`) |
 | `POST` | `/api/auth/login` | Không | Đăng nhập (`identifier`, `password`), trả về JWT token |
 | `GET` | `/api/auth/me` | Bearer Token | Lấy thông tin tài khoản, xu, ELO và điểm uy tín |
@@ -262,23 +300,41 @@ dotnet run
 
 ## ⚙️ CẤU HÌNH BIẾN MÔI TRƯỜNG (.env)
 
-Tạo file `.env` tại thư mục `cotulenh_server/` dựa theo mẫu:
+Sao chép từ file mẫu [`cotulenh_server/.env.example`](cotulenh_server/.env.example) sang `cotulenh_server/.env`:
 
 ```env
-# Chuỗi bí mật mã hóa JWT (tối thiểu 32 ký tự)
-JWT_SECRET_KEY=cotulenh-super-secret-key-production-32-chars
+# 1. Môi trường chạy: development (cho phép SQLite/MySQL local) | production (bắt buộc MySQL/RDS)
+APP_ENV=development
 
-# Chuỗi kết nối Database:
-# Chạy local SQLite (mặc định nếu bỏ trống): sqlite:///cotulenh.db
-# Chạy local Docker MySQL: mysql+pymysql://cotulenh:cotulenh123@db:3306/cotulenh
-# Chạy AWS RDS MySQL: mysql+pymysql://<USER>:<PASS>@<RDS_ENDPOINT>:3306/<DB_NAME>
+# 2. Chuỗi bí mật mã hóa JWT (bắt buộc đổi sang chuỗi ngẫu nhiên >= 32 ký tự khi lên production)
+JWT_SECRET_KEY=doi-thanh-chuoi-ngau-nhien-it-nhat-32-ky-tu
+
+# 3. Chuỗi kết nối Database (Thống nhất driver PyMySQL cho MySQL / AWS RDS):
+# - Mặc định local SQLite:
 DATABASE_URL=sqlite:///cotulenh.db
+# - Hoặc kết nối MySQL / AWS RDS qua bộ biến rời (an toàn với mật khẩu có ký tự đặc biệt; nhớ comment dòng DATABASE_URL ở trên):
+# DB_HOST=<RDS_ENDPOINT_HOAC_127.0.0.1>
+# DB_PORT=3306
+# DB_NAME=cotulenh
+# DB_USER=<DB_USER>
+# DB_PASSWORD=<DB_PASSWORD>
+# DB_SSL_MODE=VERIFY_IDENTITY
+# (Chỉ đặt DB_SSL_CA=certs/global-bundle.pem khi chạy trực tiếp ngoài Docker; Docker tự dùng CA tích hợp sẵn)
 
-# Tài khoản Gmail SMTP gửi OTP
+# 4. Connection Pool & Timeout (MySQL / RDS)
+DB_CONNECT_TIMEOUT=10
+DB_READ_TIMEOUT=30
+DB_WRITE_TIMEOUT=30
+DB_POOL_SIZE=10
+DB_MAX_OVERFLOW=20
+DB_POOL_TIMEOUT=10
+DB_POOL_RECYCLE=280
+
+# 5. Tài khoản Gmail SMTP gửi OTP
 MAIL_USERNAME=your_email@gmail.com
 MAIL_APP_PASSWORD=your_16_character_app_password
 
-# Cấu hình thời gian (giây)
+# 6. Cấu hình thời gian gameplay (giây)
 TURN_SECONDS=45
 RECONNECT_TIMEOUT=50
 JOIN_REQUEST_TIMEOUT=20

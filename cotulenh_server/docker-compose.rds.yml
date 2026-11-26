@@ -1,0 +1,47 @@
+# =============================================================================
+# DOCKER COMPOSE PRODUCTION — KẾT NỐI AWS RDS MYSQL (Không chạy MySQL nội bộ)
+# Toàn bộ biến lấy thống nhất từ một nguồn (shell / .env mặc định / cờ --env-file):
+#   - Dùng file .env mặc định:
+#       docker compose -f docker-compose.rds.yml up --build -d
+#   - Dùng file cấu hình riêng (ví dụ .env.rds):
+#       docker compose --env-file .env.rds -f docker-compose.rds.yml up --build -d
+# =============================================================================
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Bat buoc cau hinh JWT_SECRET_KEY bao mat (>=32 ky tu) trong .env hoac qua --env-file}
+      # Hỗ trợ khai báo qua bộ biến rời DB_HOST/DB_USER/DB_PASSWORD/DB_NAME (an toàn với mật khẩu có ký tự đặc biệt)
+      # hoặc qua DATABASE_URL (không chứa tham số TLS trên query string):
+      DATABASE_URL: ${DATABASE_URL:-}
+      DB_HOST: ${DB_HOST:-}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_NAME: ${DB_NAME:-}
+      DB_USER: ${DB_USER:-}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_SSL_MODE: ${DB_SSL_MODE:-VERIFY_IDENTITY}
+      # Mặc định dùng chứng chỉ AWS RDS đã tích hợp sẵn trong Docker image:
+      DB_SSL_CA: ${DB_SSL_CA:-/etc/ssl/certs/aws-rds-global-bundle.pem}
+      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-10}
+      DB_READ_TIMEOUT: ${DB_READ_TIMEOUT:-30}
+      DB_WRITE_TIMEOUT: ${DB_WRITE_TIMEOUT:-30}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-10}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-280}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_APP_PASSWORD: ${MAIL_APP_PASSWORD:-}
+      TURN_SECONDS: ${TURN_SECONDS:-45}
+      RECONNECT_TIMEOUT: ${RECONNECT_TIMEOUT:-50}
+      JOIN_REQUEST_TIMEOUT: ${JOIN_REQUEST_TIMEOUT:-20}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
+    ports:
+      - "${PORT:-5000}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/db-health', timeout=5)"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
