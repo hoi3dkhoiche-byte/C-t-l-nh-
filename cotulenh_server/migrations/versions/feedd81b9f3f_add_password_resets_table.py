@@ -25,7 +25,7 @@ def upgrade():
     sa.Column('expires_at', sa.DateTime(), nullable=False),
     sa.Column('attempts', sa.Integer(), nullable=False),
     sa.Column('used', sa.Boolean(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
