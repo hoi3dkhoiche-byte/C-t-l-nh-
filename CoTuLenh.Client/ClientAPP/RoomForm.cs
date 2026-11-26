@@ -13,6 +13,8 @@ public partial class RoomForm : BaseForm
         InitializeComponent();
         this.Load += RoomForm_Load;
         this.FormClosed += RoomForm_FormClosed;
+        // Handler riêng, luôn chạy khi form đóng (kể cả lúc chuyển sang GamePlayForm)
+        this.FormClosed += RoomForm_UnsubscribeRealtime;
     }
 
     private void RoomForm_Load(object? sender, EventArgs e)
@@ -41,22 +43,69 @@ public partial class RoomForm : BaseForm
 
         lstChat.Items.Add($"[Hệ thống] Bạn đã vào phòng {_room.RoomCode}");
         lstChat.Items.Add("[Hệ thống] Cả hai kỳ thủ hãy chuẩn bị!");
+
+        // Nghe chat và thông báo phòng từ server
+        RealtimeService.Instance.OnChatMessage += Realtime_OnChatMessage;
+        RealtimeService.Instance.OnChatRejected += Realtime_OnSystemText;
+        RealtimeService.Instance.OnRoomNotice += Realtime_OnSystemText;
+
+        _ = JoinRoomRealtimeAsync();
+    }
+
+    private async Task JoinRoomRealtimeAsync()
+    {
+        bool ok = await RealtimeService.Instance.JoinRoomAsync(_room.RoomCode);
+        if (!ok)
+        {
+            AddChatLine("[Hệ thống] Không kết nối được server, chat đang tắt");
+        }
     }
 
     private void RoomForm_FormClosed(object? sender, FormClosedEventArgs e)
     {
+        _ = RealtimeService.Instance.LeaveRoomAsync();
         new LobbyForm().Show();
     }
 
-    private void btnSendChat_Click(object? sender, EventArgs e)
+    private void RoomForm_UnsubscribeRealtime(object? sender, FormClosedEventArgs e)
+    {
+        RealtimeService.Instance.OnChatMessage -= Realtime_OnChatMessage;
+        RealtimeService.Instance.OnChatRejected -= Realtime_OnSystemText;
+        RealtimeService.Instance.OnRoomNotice -= Realtime_OnSystemText;
+    }
+
+    private async void btnSendChat_Click(object? sender, EventArgs e)
     {
         string msg = txtChatInput.Text.Trim();
         if (string.IsNullOrEmpty(msg)) return;
 
-        var user = SessionService.Instance.CurrentUser?.Username ?? "Tôi";
-        lstChat.Items.Add($"[{user}]: {msg}");
+        bool sent = await RealtimeService.Instance.SendChatAsync(msg);
+        if (!sent)
+        {
+            AddChatLine("[Hệ thống] Mất kết nối server, chưa gửi được");
+            return;
+        }
         txtChatInput.Clear();
         txtChatInput.Focus();
+    }
+
+    private void Realtime_OnChatMessage(ChatMessageModel msg)
+    {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+        this.BeginInvoke(new Action(() => AddChatLine($"[{msg.Username}]: {msg.Message}")));
+    }
+
+    private void Realtime_OnSystemText(string text)
+    {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+        this.BeginInvoke(new Action(() => AddChatLine($"[Hệ thống] {text}")));
+    }
+
+    // Thêm một dòng vào khung chat và cuộn xuống dòng mới nhất
+    private void AddChatLine(string line)
+    {
+        lstChat.Items.Add(line);
+        lstChat.TopIndex = lstChat.Items.Count - 1;
     }
 
     private void btnAction_Click(object? sender, EventArgs e)
@@ -67,7 +116,6 @@ public partial class RoomForm : BaseForm
             return;
         }
 
-        // Bắt đầu ván đấu -> chuyển sang GamePlayForm
         var gameForm = new GamePlayForm(_room);
         gameForm.Show();
         this.FormClosed -= RoomForm_FormClosed;
