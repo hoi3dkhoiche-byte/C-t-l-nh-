@@ -215,21 +215,29 @@ Khi triển khai lên Cloud (EC2 / ECS), hệ thống tách riêng cấu hình q
 1. **Mạng & Bảo mật AWS:**
    * Tạo AWS RDS **MySQL 8.x** đặt trong Private Subnet cùng VPC với máy chủ chạy backend.
    * Cấu hình **RDS Security Group**: chỉ mở Inbound port `3306` từ Security Group của máy chủ ứng dụng (không mở `0.0.0.0/0`).
-2. **Cấu hình `.env` trên máy chủ Production:**
+2. **Cấu hình biến môi trường trên máy chủ Production (`.env` hoặc file riêng như `.env.rds`):**
    ```env
    APP_ENV=production
    JWT_SECRET_KEY=<chuoi_ngau_nhien_bao_mat_toi_thieu_32_ky_tu>
-   DATABASE_URL=mysql+pymysql://<DB_USER>:<DB_PASSWORD>@<RDS_ENDPOINT>:3306/<DB_NAME>
+   # Khuyên dùng bộ biến rời DB_* để mật khẩu chứa ký tự đặc biệt (@, :, /, ?, #, %) được mã hóa an toàn bằng URL.create:
+   DB_HOST=<RDS_ENDPOINT>
+   DB_PORT=3306
+   DB_NAME=cotulenh
+   DB_USER=<DB_USER>
+   DB_PASSWORD=<DB_PASSWORD>
    DB_SSL_MODE=VERIFY_IDENTITY
-   # Nếu chạy bằng Docker: chứng chỉ CA của AWS RDS đã được tích hợp sẵn tại /etc/ssl/certs/aws-rds-global-bundle.pem
-   # Nếu chạy trực tiếp trên host ngoài Docker: tải global-bundle.pem và trỏ DB_SSL_CA tới đường dẫn file
+   # LƯU Ý: Khi chạy bằng Docker, KHÔNG đặt DB_SSL_CA=certs/global-bundle.pem để container tự dùng CA tích hợp sẵn
+   # (/etc/ssl/certs/aws-rds-global-bundle.pem). Chỉ đặt DB_SSL_CA khi chạy Python trực tiếp ngoài Docker trên máy host.
    ```
-   > **Cơ chế an toàn (`Fail-fast`):** Khi `APP_ENV=production`, nếu thiếu `DATABASE_URL`, dùng nhầm SQLite, giữ nguyên chuỗi mẫu (placeholder) hoặc thiếu `JWT_SECRET_KEY` hợp lệ, server sẽ **báo lỗi dừng ngay lúc khởi động** thay vì âm thầm chạy SQLite cục bộ.
-   > **Lưu ý dữ liệu:** Thay đổi `DATABASE_URL` chỉ đổi nơi kết nối DB (Alembic sẽ tự tạo bảng mới trên RDS). Nếu muốn giữ dữ liệu từ file SQLite local cũ, cần xuất/nhập dữ liệu riêng.
+   > **Cơ chế an toàn (`Fail-fast`):** Khi `APP_ENV=production`, server bắt buộc có kết nối MySQL/RDS và `JWT_SECRET_KEY` hợp lệ; tự động từ chối mọi tham số TLS mâu thuẫn trên URL (như `?ssl_disabled=true`, `?ssl_verify_cert=0`).
+   > **Lưu ý dữ liệu:** Thay đổi nơi kết nối sang RDS sẽ tạo cấu trúc bảng mới trên RDS qua Alembic; nếu muốn giữ dữ liệu SQLite cũ cần xuất/nhập dữ liệu riêng.
 3. **Khởi chạy Production Compose:**
    ```bash
    cd cotulenh_server
+   # Dùng file .env mặc định:
    docker compose -f docker-compose.rds.yml up --build -d
+   # Hoặc chỉ định file cấu hình riêng thống nhất qua --env-file:
+   docker compose --env-file .env.rds -f docker-compose.rds.yml up --build -d
    ```
 
 ---
@@ -304,13 +312,14 @@ JWT_SECRET_KEY=doi-thanh-chuoi-ngau-nhien-it-nhat-32-ky-tu
 # 3. Chuỗi kết nối Database (Thống nhất driver PyMySQL cho MySQL / AWS RDS):
 # - Mặc định local SQLite:
 DATABASE_URL=sqlite:///cotulenh.db
-# - Hoặc kết nối MySQL Docker local:
-# DATABASE_URL=mysql+pymysql://cotulenh:cotulenh123@127.0.0.1:3306/cotulenh
-# DB_SSL_MODE=DISABLED
-# - Hoặc triển khai AWS RDS MySQL (khi APP_ENV=production):
-# DATABASE_URL=mysql+pymysql://<DB_USER>:<DB_PASSWORD>@<RDS_ENDPOINT>:3306/<DB_NAME>
+# - Hoặc kết nối MySQL / AWS RDS qua bộ biến rời (an toàn với mật khẩu có ký tự đặc biệt; nhớ comment dòng DATABASE_URL ở trên):
+# DB_HOST=<RDS_ENDPOINT_HOAC_127.0.0.1>
+# DB_PORT=3306
+# DB_NAME=cotulenh
+# DB_USER=<DB_USER>
+# DB_PASSWORD=<DB_PASSWORD>
 # DB_SSL_MODE=VERIFY_IDENTITY
-# DB_SSL_CA=certs/global-bundle.pem
+# (Chỉ đặt DB_SSL_CA=certs/global-bundle.pem khi chạy trực tiếp ngoài Docker; Docker tự dùng CA tích hợp sẵn)
 
 # 4. Connection Pool & Timeout (MySQL / RDS)
 DB_CONNECT_TIMEOUT=10

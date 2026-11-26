@@ -13,7 +13,7 @@ from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 
@@ -39,8 +39,14 @@ PLACEHOLDER_DB_MARKERS = (
     "<RDS_ENDPOINT>",
     "<DB_USER>",
     "<DB_PASSWORD>",
+    "<DB_NAME>",
     "rds-cotulenh-endpoint.amazonaws.com",
 )
+FORBIDDEN_MYSQL_QUERY_KEYS = {
+    "read_default_file",
+    "read_default_group",
+    "client_flag",
+}
 DEFAULT_RDS_CA_CANDIDATES = (
     BASE_DIR / "certs" / "global-bundle.pem",
     Path("/etc/ssl/certs/aws-rds-global-bundle.pem"),
@@ -149,41 +155,108 @@ def build_mysql_ssl_context(env=os.environ, *, is_production: bool = False) -> s
     return ctx
 
 
+def _validate_no_conflicting_url_params(parsed_url: URL) -> None:
+    """
+    Từ chối các tham số TLS/SSL hoặc cấu hình client nguy hiểm trên query string của DATABASE_URL
+    (ví dụ ?ssl_disabled=true, ?ssl_verify_cert=0, ?read_default_file=...) để tránh ghi đè DB_SSL_MODE.
+    """
+    conflicting = []
+    for raw_key in parsed_url.query.keys():
+        norm_key = raw_key.strip().lower().replace("-", "_")
+        if norm_key.startswith(("ssl", "tls")) or norm_key in FORBIDDEN_MYSQL_QUERY_KEYS:
+            conflicting.append(raw_key)
+    if conflicting:
+        raise RuntimeError(
+            f"DATABASE_URL chứa tham số cấu hình mâu thuẫn trên query string ({', '.join(conflicting)}). "
+            "Vui lòng xóa các tham số này khỏi URL và cấu hình TLS thống nhất qua DB_SSL_MODE / DB_SSL_CA."
+        )
+
+
+def _resolve_parsed_database_url(env, *, is_production: bool) -> URL:
+    """
+    Xây dựng đối tượng SQLAlchemy URL an toàn:
+    1. Nếu có DATABASE_URL: kiểm tra placeholder, parse URL và hỗ trợ bổ sung DB_PASSWORD qua URL.set().
+    2. Nếu không có DATABASE_URL nhưng có DB_HOST: tạo bằng URL.create() để tự động mã hóa ký tự đặc biệt trong mật khẩu (@, :, /, ?, #, %).
+    3. Nếu cả hai đều trống: cho phép fallback SQLite ở local/dev; báo lỗi ngay ở production.
+    """
+    raw_url = (env.get("DATABASE_URL") or "").strip()
+    db_host = (env.get("DB_HOST") or "").strip()
+
+    if raw_url:
+        if any(marker in raw_url for marker in PLACEHOLDER_DB_MARKERS):
+            raise RuntimeError(
+                "DATABASE_URL đang chứa giá trị mẫu (placeholder). "
+                "Vui lòng cấu hình thông tin kết nối thực tế."
+            )
+        try:
+            parsed_url = make_url(raw_url)
+        except ArgumentError as exc:
+            raise RuntimeError(f"Định dạng DATABASE_URL không hợp lệ: {exc}") from exc
+
+        extra_password = env.get("DB_PASSWORD")
+        if parsed_url.password is None and extra_password:
+            parsed_url = parsed_url.set(password=extra_password)
+        return parsed_url
+
+    if db_host:
+        db_user = (env.get("DB_USER") or "").strip()
+        db_password = env.get("DB_PASSWORD") or ""
+        db_name = (env.get("DB_NAME") or "").strip()
+        db_port = _env_int(env, "DB_PORT", 3306)
+
+        for field_name, val in (
+            ("DB_HOST", db_host),
+            ("DB_USER", db_user),
+            ("DB_PASSWORD", db_password),
+            ("DB_NAME", db_name),
+        ):
+            if any(marker in val for marker in PLACEHOLDER_DB_MARKERS):
+                raise RuntimeError(f"Biến môi trường {field_name} đang chứa giá trị mẫu (placeholder).")
+
+        if not db_user or not db_name:
+            raise RuntimeError("Khi cấu hình qua DB_HOST, bắt buộc phải khai báo đầy đủ DB_USER và DB_NAME.")
+        if is_production and not db_password:
+            raise RuntimeError("APP_ENV=production bắt buộc phải khai báo DB_PASSWORD khi dùng DB_HOST.")
+
+        return URL.create(
+            drivername="mysql+pymysql",
+            username=db_user,
+            password=db_password,
+            host=db_host,
+            port=db_port,
+            database=db_name,
+        )
+
+    if is_production:
+        raise RuntimeError(
+            "APP_ENV=production bắt buộc phải cấu hình DATABASE_URL hoặc bộ biến "
+            "(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME) trỏ tới MySQL/AWS RDS; "
+            "không cho phép tự động chạy SQLite."
+        )
+    return make_url("sqlite:///cotulenh.db")
+
+
 def build_database_config(env=os.environ) -> tuple[str, dict]:
     """
     Xây dựng (SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS):
-    - Local/dev: cho phép fallback sang SQLite nếu chưa khai báo DATABASE_URL.
-    - Production: bắt buộc có DATABASE_URL hợp lệ (MySQL/RDS), cấm fallback âm thầm sang SQLite.
+    - Local/dev: cho phép fallback sang SQLite nếu chưa khai báo DATABASE_URL / DB_HOST.
+    - Production: bắt buộc có MySQL/RDS hợp lệ, cấm fallback âm thầm sang SQLite.
+    - Chặn tham số TLS mâu thuẫn trên URL và đảm bảo DISABLED tắt hẳn TLS trên PyMySQL.
     """
     _, is_production = resolve_app_env(env)
-    database_url = (env.get("DATABASE_URL") or "").strip()
-
-    if any(marker in database_url for marker in PLACEHOLDER_DB_MARKERS):
-        raise RuntimeError(
-            "DATABASE_URL đang chứa giá trị mẫu (placeholder). "
-            "Vui lòng cấu hình URL database thực tế trong file .env."
-        )
-
-    if not database_url:
-        if is_production:
-            raise RuntimeError(
-                "APP_ENV=production bắt buộc phải cấu hình biến môi trường DATABASE_URL "
-                "(ví dụ mysql+pymysql://...); không cho phép tự động chạy SQLite."
-            )
-        database_url = "sqlite:///cotulenh.db"
-
-    try:
-        parsed_url = make_url(database_url)
-    except ArgumentError as exc:
-        raise RuntimeError(f"Định dạng DATABASE_URL không hợp lệ: {exc}") from exc
-
+    parsed_url = _resolve_parsed_database_url(env, is_production=is_production)
     backend = parsed_url.get_backend_name()
+
     if is_production and backend == "sqlite":
         raise RuntimeError(
             "APP_ENV=production không cho phép sử dụng SQLite. "
-            "Hãy trỏ DATABASE_URL tới MySQL / AWS RDS."
+            "Hãy trỏ DATABASE_URL hoặc DB_HOST tới MySQL / AWS RDS."
         )
 
+    if backend == "mysql":
+        _validate_no_conflicting_url_params(parsed_url)
+
+    database_url = parsed_url.render_as_string(hide_password=False)
     connect_timeout = _env_int(env, "DB_CONNECT_TIMEOUT", 10)
 
     if backend == "sqlite":
@@ -210,7 +283,11 @@ def build_database_config(env=os.environ) -> tuple[str, dict]:
         }
         ssl_ctx = build_mysql_ssl_context(env, is_production=is_production)
         if ssl_ctx is not None:
+            connect_args["ssl_disabled"] = False
             connect_args["ssl"] = ssl_ctx
+        else:
+            # PyMySQL 1.2+ mặc định thử TLS (PREFERRED) nếu không truyền ssl_disabled=True
+            connect_args["ssl_disabled"] = True
         engine_options["connect_args"] = connect_args
 
     return database_url, engine_options

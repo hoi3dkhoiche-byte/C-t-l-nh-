@@ -1,6 +1,9 @@
 # =============================================================================
 # DOCKER COMPOSE DÀNH CHO MÔI TRƯỜNG LOCAL / DEVELOPMENT (Kèm MySQL 8.4 nội bộ)
-# Chạy: docker compose up --build -d
+# Chạy mặc định (đọc từ .env):
+#   docker compose up --build -d
+# Chạy với file biến môi trường tùy chọn:
+#   docker compose --env-file .env.local up --build -d
 # (Nếu triển khai Production kết nối AWS RDS, dùng file: docker-compose.rds.yml)
 # =============================================================================
 services:
@@ -24,25 +27,43 @@ services:
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
       start_period: 20s
 
   # ---------- Server Flask ----------
+  # Truyền rời DB_HOST / DB_USER / DB_PASSWORD / DB_NAME để main.py tạo URL bằng URL.create()
+  # (tránh lỗi hỏng URL khi mật khẩu chứa ký tự đặc biệt như @, :, /, ?, #, %).
   server:
     build: .
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
     environment:
       APP_ENV: development
-      DATABASE_URL: mysql+pymysql://${DB_USER:-cotulenh}:${DB_PASSWORD:-cotulenh123}@db:3306/${DB_NAME:-cotulenh}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
+      DATABASE_URL: ""
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:-cotulenh}
+      DB_USER: ${DB_USER:-cotulenh}
+      DB_PASSWORD: ${DB_PASSWORD:-cotulenh123}
       DB_SSL_MODE: DISABLED
+      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-10}
+      DB_READ_TIMEOUT: ${DB_READ_TIMEOUT:-30}
+      DB_WRITE_TIMEOUT: ${DB_WRITE_TIMEOUT:-30}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-10}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-280}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_APP_PASSWORD: ${MAIL_APP_PASSWORD:-}
+      TURN_SECONDS: ${TURN_SECONDS:-45}
+      RECONNECT_TIMEOUT: ${RECONNECT_TIMEOUT:-50}
+      JOIN_REQUEST_TIMEOUT: ${JOIN_REQUEST_TIMEOUT:-20}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
     ports:
-      - "5000:5000"
+      - "${PORT:-5000}:5000"
     depends_on:
       db:
         condition: service_healthy
