@@ -16,6 +16,11 @@ public partial class GamePlayForm : BaseForm
         InitializeComponent();
         this.Load += GamePlayForm_Load;
         this.FormClosed += GamePlayForm_FormClosed;
+        this.FormClosed += GamePlayForm_RealtimeClosed;
+
+        RealtimeService.Instance.OnChatMessage += Realtime_OnChatMessage;
+        RealtimeService.Instance.OnChatRejected += Realtime_OnSystemText;
+        RealtimeService.Instance.OnRoomNotice += Realtime_OnSystemText;
 
         board.OnPieceMoved += Board_OnPieceMoved;
         board.OnPieceSelected += Board_OnPieceSelected;
@@ -490,14 +495,44 @@ public partial class GamePlayForm : BaseForm
         this.Close();
     }
 
-    private void btnSend_Click(object? sender, EventArgs e)
+    private async void btnSend_Click(object? sender, EventArgs e)
     {
         string msg = txtChat.Text.Trim();
         if (string.IsNullOrEmpty(msg)) return;
 
-        var user = SessionService.Instance.CurrentUser?.Username ?? "Tôi";
-        lstChat.Items.Add($"[{user}]: {msg}");
+        bool sent = await RealtimeService.Instance.SendChatAsync(msg);
+        if (!sent)
+        {
+            AddChatLine("[Hệ thống] Mất kết nối server, chưa gửi được");
+            return;
+        }
         txtChat.Clear();
+    }
+
+    private void GamePlayForm_RealtimeClosed(object? sender, FormClosedEventArgs e)
+    {
+        RealtimeService.Instance.OnChatMessage -= Realtime_OnChatMessage;
+        RealtimeService.Instance.OnChatRejected -= Realtime_OnSystemText;
+        RealtimeService.Instance.OnRoomNotice -= Realtime_OnSystemText;
+        _ = RealtimeService.Instance.LeaveRoomAsync();
+    }
+
+    private void Realtime_OnChatMessage(ChatMessageModel msg)
+    {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+        this.BeginInvoke(new Action(() => AddChatLine($"[{msg.Username}]: {msg.Message}")));
+    }
+
+    private void Realtime_OnSystemText(string text)
+    {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+        this.BeginInvoke(new Action(() => AddChatLine($"[Hệ thống] {text}")));
+    }
+
+    private void AddChatLine(string line)
+    {
+        lstChat.Items.Add(line);
+        lstChat.TopIndex = lstChat.Items.Count - 1;
     }
 
     private void btnDraw_Click(object? sender, EventArgs e)
