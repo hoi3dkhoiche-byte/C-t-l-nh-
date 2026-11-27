@@ -42,10 +42,10 @@ public class RoomCard : UserControl
         lblPlayers.Location = new Point(160, 12);
         lblPlayers.AutoSize = true;
 
-        // Chủ phòng
-        lblHost.Text = $"Chủ phòng: {_room.HostUsername}";
-        lblHost.Font = new Font("Segoe UI", 9.5F);
-        lblHost.ForeColor = Color.FromArgb(80, 90, 100);
+        // Chủ phòng & Uy tín
+        lblHost.Text = $"Chủ phòng: {_room.HostUsername} (⭐{_room.HostReputation})";
+        lblHost.Font = new Font("Segoe UI", 9F);
+        lblHost.ForeColor = _room.HostReputation < 6 ? Color.FromArgb(211, 84, 0) : Color.FromArgb(80, 90, 100);
         lblHost.Location = new Point(12, 40);
         lblHost.Size = new Size(216, 22);
 

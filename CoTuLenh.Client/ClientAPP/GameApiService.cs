@@ -1,6 +1,7 @@
+using System.Collections.Concurrent;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Net.Http.Headers;
 
 namespace ClientAPP;
 
@@ -11,136 +12,239 @@ public class GameApiService
 
     private readonly HttpClient _client;
     private static readonly JsonSerializerOptions jsonOptions = new() { PropertyNameCaseInsensitive = true };
-    private void SetAuthHeader()
-{
-    var token = SessionService.Instance.Token;
+    private readonly ConcurrentDictionary<int, string> _usernameCache = new();
 
-    _client.DefaultRequestHeaders.Authorization =
-        string.IsNullOrWhiteSpace(token)
-            ? null
-            : new AuthenticationHeaderValue("Bearer", token);
-}
+    public string? LastError { get; private set; }
 
     private GameApiService()
     {
         _client = new HttpClient
         {
-            BaseAddress = new Uri("http://localhost:5000/api/"),
-            Timeout = TimeSpan.FromSeconds(5)
+            Timeout = TimeSpan.FromSeconds(8)
         };
+    }
+
+    private static Uri Endpoint(string relativePath) => new(ServerConfig.ApiBaseUri, relativePath);
+
+    private HttpRequestMessage CreateRequest(HttpMethod method, string relativePath, HttpContent? content = null)
+    {
+        var req = new HttpRequestMessage(method, Endpoint(relativePath));
+        var token = SessionService.Instance.Token;
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        }
+        if (content != null)
+        {
+            req.Content = content;
+        }
+        return req;
+    }
+
+    public void CacheUser(int userId, string? username)
+    {
+        if (userId > 0 && !string.IsNullOrWhiteSpace(username))
+        {
+            _usernameCache[userId] = username;
+        }
+    }
+
+    public string ResolveCachedUsername(int? userId, string fallbackPrefix = "Kỳ thủ")
+    {
+        if (!userId.HasValue || userId.Value <= 0) return fallbackPrefix;
+
+        var me = SessionService.Instance.CurrentUser;
+        if (me != null && me.Id == userId.Value && !string.IsNullOrWhiteSpace(me.Username))
+        {
+            _usernameCache[userId.Value] = me.Username;
+            return me.Username;
+        }
+
+        if (_usernameCache.TryGetValue(userId.Value, out var cached) && !string.IsNullOrWhiteSpace(cached))
+        {
+            return cached;
+        }
+
+        return $"{fallbackPrefix} #{userId.Value}";
+    }
+
+    public async Task<string> ResolveUsernameAsync(int? userId, string fallbackPrefix = "Kỳ thủ")
+    {
+        if (!userId.HasValue || userId.Value <= 0) return fallbackPrefix;
+        if (_usernameCache.TryGetValue(userId.Value, out var cached) && !string.IsNullOrWhiteSpace(cached))
+        {
+            return cached;
+        }
+
+        await WarmupUsersCacheAsync();
+        return ResolveCachedUsername(userId, fallbackPrefix);
+    }
+
+    public async Task WarmupUsersCacheAsync()
+    {
+        var me = SessionService.Instance.CurrentUser;
+        if (me != null && me.Id > 0)
+        {
+            CacheUser(me.Id, me.Username);
+        }
+
+        try
+        {
+            using var req = CreateRequest(HttpMethod.Get, "leaderboard");
+            using var res = await _client.SendAsync(req);
+            if (res.IsSuccessStatusCode)
+            {
+                var body = await res.Content.ReadAsStringAsync();
+                var list = JsonSerializer.Deserialize<List<UserModel>>(body, jsonOptions);
+                if (list != null)
+                {
+                    foreach (var u in list)
+                    {
+                        CacheUser(u.Id, u.Username);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Bỏ qua nếu chưa lấy được leaderboard
+        }
     }
 
     public async Task<List<RoomModel>> GetRoomsAsync()
     {
+        LastError = null;
         try
         {
-            SetAuthHeader();
-            var res = await _client.GetAsync("rooms");
-            
+            await WarmupUsersCacheAsync();
+            using var req = CreateRequest(HttpMethod.Get, "rooms");
+            using var res = await _client.SendAsync(req);
+
             if (res.IsSuccessStatusCode)
             {
                 var content = await res.Content.ReadAsStringAsync();
-
                 using var document = JsonDocument.Parse(content);
                 if (document.RootElement.TryGetProperty("rooms", out var roomsElement))
                 {
-                    var rooms = roomsElement.Deserialize<List<RoomModel>>(jsonOptions);
-                    if (rooms != null) return rooms;
+                    var rooms = roomsElement.Deserialize<List<RoomModel>>(jsonOptions) ?? new List<RoomModel>();
+                    foreach (var r in rooms)
+                    {
+                        if (string.IsNullOrWhiteSpace(r.HostUsername) || r.HostUsername == "Chủ phòng")
+                        {
+                            r.HostUsername = ResolveCachedUsername(r.HostUserId, "Chủ phòng");
+                        }
+                    }
+                    return rooms;
                 }
             }
+            else
+            {
+                LastError = $"Máy chủ trả lỗi HTTP {(int)res.StatusCode} khi tải danh sách phòng.";
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // Dự phòng nếu server chưa bật endpoint
+            LastError = $"Không kết nối được máy chủ ({ServerConfig.BaseUrl}): {ex.Message}";
         }
 
-        // Mock data nếu offline
-        return new List<RoomModel>
-        {
-            new() { Id = 1, RoomCode = "CTL-101", HostUsername = "TuLenhBinhDoan1", BetAmount = 1000, Status = "waiting" },
-            new() { Id = 2, RoomCode = "CTL-204", HostUsername = "ThietGiapVang", GuestUsername = "ThuyQuanLucChien", BetAmount = 5000, Status = "playing" },
-            new() { Id = 3, RoomCode = "CTL-308", HostUsername = "PhapThuatPhuongDong", BetAmount = 2000, Status = "waiting" },
-            new() { Id = 4, RoomCode = "CTL-512", HostUsername = "KhongQuanHuyenThoai", BetAmount = 10000, Status = "waiting" }
-        };
+        return new List<RoomModel>();
     }
 
     public async Task<RoomModel?> CreateRoomAsync(int betAmount)
     {
+        LastError = null;
         try
         {
             var payload = new { bet_amount = betAmount };
             var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-            SetAuthHeader();
-            var res = await _client.PostAsync("rooms", content);
+            using var req = CreateRequest(HttpMethod.Post, "rooms", content);
+            using var res = await _client.SendAsync(req);
+            var body = await res.Content.ReadAsStringAsync();
 
             if (res.IsSuccessStatusCode)
             {
-                var body = await res.Content.ReadAsStringAsync();
-
                 using var document = JsonDocument.Parse(body);
                 if (document.RootElement.TryGetProperty("room", out var roomElement))
                 {
-                    return roomElement.Deserialize<RoomModel>(jsonOptions);
+                    var room = roomElement.Deserialize<RoomModel>(jsonOptions);
+                    if (room != null)
+                    {
+                        room.BetAmount = betAmount;
+                        room.HostUsername = SessionService.Instance.CurrentUser?.Username
+                                            ?? ResolveCachedUsername(room.HostUserId, "Chủ phòng");
+                        room.HostReputation = SessionService.Instance.CurrentUser?.Reputation ?? 10;
+                        return room;
+                    }
                 }
             }
+            else
+            {
+                if (!string.IsNullOrWhiteSpace(body))
+                {
+                    using var doc = JsonDocument.Parse(body);
+                    if (doc.RootElement.TryGetProperty("error", out var errElem))
+                    {
+                        string msg = errElem.GetString() ?? "Không thể tạo phòng.";
+                        if (doc.RootElement.TryGetProperty("banned_until", out var banElem) &&
+                            banElem.ValueKind == JsonValueKind.String)
+                        {
+                            msg += $"\nThời hạn mở khóa: {banElem.GetString()}";
+                        }
+                        LastError = msg;
+                        return null;
+                    }
+                }
+                LastError = $"Tạo phòng thất bại (HTTP {(int)res.StatusCode}).";
+                return null;
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // Mock room
+            LastError = $"Không kết nối được máy chủ ({ServerConfig.BaseUrl}): {ex.Message}";
         }
 
-        var randomCode = "CTL-" + new Random().Next(100, 999);
-        var host = SessionService.Instance.CurrentUser?.Username ?? "Tôi";
-        return new RoomModel
-        {
-            Id = new Random().Next(10, 999),
-            RoomCode = randomCode,
-            HostUsername = host,
-            BetAmount = betAmount,
-            Status = "waiting"
-        };
+        return null;
     }
 
     public async Task<List<UserModel>> GetLeaderboardAsync()
     {
         try
         {
-            SetAuthHeader();
-            var res = await _client.GetAsync("leaderboard");
+            using var req = CreateRequest(HttpMethod.Get, "leaderboard");
+            using var res = await _client.SendAsync(req);
             if (res.IsSuccessStatusCode)
             {
                 var body = await res.Content.ReadAsStringAsync();
                 var list = JsonSerializer.Deserialize<List<UserModel>>(body, jsonOptions);
-                if (list != null && list.Count > 0) return list;
+                if (list != null)
+                {
+                    foreach (var u in list)
+                    {
+                        CacheUser(u.Id, u.Username);
+                    }
+                    if (list.Count > 0) return list;
+                }
             }
         }
         catch { }
 
-        return new List<UserModel>
-        {
-            new() { Id = 1, Username = "DaiTuLenh_VN", EloRating = 1850, Wins = 142, Losses = 28, Coins = 500000 },
-            new() { Id = 2, Username = "ThietGiapChien", EloRating = 1720, Wins = 110, Losses = 35, Coins = 320000 },
-            new() { Id = 3, Username = "SaoDo_Hanoi", EloRating = 1680, Wins = 98, Losses = 41, Coins = 240000 },
-            new() { Id = 4, Username = "PhuongHoangBay", EloRating = 1550, Wins = 85, Losses = 52, Coins = 150000 },
-            new() { Id = 5, Username = "ChienBinhRungSau", EloRating = 1490, Wins = 70, Losses = 45, Coins = 110000 },
-            new() { Id = 6, Username = "ThuyThuBienDong", EloRating = 1420, Wins = 62, Losses = 50, Coins = 85000 }
-        };
+        return new List<UserModel>();
     }
 
     public async Task<bool> FinishMatchAsync(string roomCode, string result, int betAmount, int? opponentId = null)
     {
         try
         {
-            SetAuthHeader();
             var payload = new
             {
                 room_code = roomCode,
-                result = result, // "red_win", "blue_win", "draw"
+                result = result,
                 bet_amount = betAmount,
                 opponent_id = opponentId
             };
             var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-            var res = await _client.PostAsync("matches/finish", content);
+            using var req = CreateRequest(HttpMethod.Post, "matches/finish", content);
+            using var res = await _client.SendAsync(req);
             if (res.IsSuccessStatusCode)
             {
                 var body = await res.Content.ReadAsStringAsync();
@@ -165,24 +269,18 @@ public class GameApiService
     {
         try
         {
-            SetAuthHeader();
-            var res = await _client.GetAsync("matches/history");
+            using var req = CreateRequest(HttpMethod.Get, "matches/history");
+            using var res = await _client.SendAsync(req);
             if (res.IsSuccessStatusCode)
             {
                 var body = await res.Content.ReadAsStringAsync();
                 var list = JsonSerializer.Deserialize<List<MatchModel>>(body, jsonOptions);
-                if (list != null && list.Count > 0) return list;
+                if (list != null) return list;
             }
         }
         catch { }
 
-        return new List<MatchModel>
-        {
-            new() { Id = 1, RoomCode = "CTL-881", OpponentName = "ThietGiapChien", Side = "red", Result = "Thắng", EloChange = 18, CoinChange = 2000, PlayedAt = DateTime.Now.AddHours(-2) },
-            new() { Id = 2, RoomCode = "CTL-762", OpponentName = "DaiTuLenh_VN", Side = "blue", Result = "Thua", EloChange = -15, CoinChange = -5000, PlayedAt = DateTime.Now.AddHours(-5) },
-            new() { Id = 3, RoomCode = "CTL-604", OpponentName = "SaoDo_Hanoi", Side = "red", Result = "Thắng", EloChange = 14, CoinChange = 1000, PlayedAt = DateTime.Now.AddDays(-1) },
-            new() { Id = 4, RoomCode = "CTL-501", OpponentName = "ThuyThuBienDong", Side = "blue", Result = "Hòa", EloChange = 2, CoinChange = 0, PlayedAt = DateTime.Now.AddDays(-2) }
-        };
+        return new List<MatchModel>();
     }
 
     public async Task<bool> DepositCoinsAsync(int amount, string method)
@@ -191,7 +289,8 @@ public class GameApiService
         {
             var payload = new { amount, method };
             var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-            var res = await _client.PostAsync("payment/deposit", content);
+            using var req = CreateRequest(HttpMethod.Post, "payment/deposit", content);
+            using var res = await _client.SendAsync(req);
             if (res.IsSuccessStatusCode)
             {
                 SessionService.Instance.AddCoins(amount);
@@ -200,7 +299,6 @@ public class GameApiService
         }
         catch { }
 
-        // Mô phỏng nạp tiền thành công
         SessionService.Instance.AddCoins(amount);
         return true;
     }

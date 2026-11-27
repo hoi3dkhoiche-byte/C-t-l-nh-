@@ -37,6 +37,10 @@ public class BoardControl : UserControl
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     [System.ComponentModel.Browsable(false)]
+    public bool IsOnlineMode { get; set; } = false; // Khi đấu Online qua Server, chỉ đi được quân phe mình khi tới lượt
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
     public CaptureMode CurrentCaptureMode { get; set; } = CaptureMode.Occupy;
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
@@ -48,6 +52,7 @@ public class BoardControl : UserControl
     public PieceView? InspectedFirePiece { get; private set; } // Quân đang soi vành đai lửa bằng chuột phải
 
     public event Action<PieceView, int, int, PieceView?>? OnPieceMoved;
+    public event Action<PieceView, int, int, CaptureMode, bool>? OnOnlineMoveRequested;
     public event Action<PieceView?>? OnPieceSelected;
     public event Action<CaptureMode>? OnCaptureModeChanged;
     public event Action<List<PieceView>>? OnStackedGroupSelected;
@@ -338,6 +343,7 @@ public class BoardControl : UserControl
     public void SelectSpecificPiece(PieceView piece)
     {
         if (isAnimatingExplosion || !piece.IsAlive) return;
+        if (IsOnlineMode && (CurrentTurn != PlayerSide || piece.Side != PlayerSide)) return;
         SelectedPiece = piece;
         ValidMoves = GetValidMoves(piece);
         OnPieceSelected?.Invoke(piece);
@@ -1011,7 +1017,112 @@ public class BoardControl : UserControl
     }
 
     /// <summary>
-    /// Quy tắc Quân Anh Hùng theo Rule.pdf:
+    /// Nạp nguyên trạng bàn cờ từ Server (khi game_started hoặc khi kết nối lại giữa ván).
+    /// Đồng bộ chính xác danh sách quân từ Server để không lệch với game_engine.py.
+    /// </summary>
+    public void LoadBoardFromServer(List<ServerPieceDto>? serverPieces, string currentTurn)
+    {
+        InitializeStandardPieces();
+        if (serverPieces != null && serverPieces.Count > 0)
+        {
+            var serverIds = serverPieces.Select(s => s.PieceId).ToHashSet();
+            Pieces.RemoveAll(p => !serverIds.Contains(p.PieceId));
+
+            foreach (var dto in serverPieces)
+            {
+                var p = Pieces.FirstOrDefault(x => x.PieceId == dto.PieceId);
+                if (p != null)
+                {
+                    p.X = dto.X;
+                    p.Y = dto.Y;
+                    p.IsAlive = dto.Alive;
+                    p.IsHero = dto.Hero;
+                    p.Score = dto.Score;
+                }
+            }
+        }
+
+        CurrentTurn = currentTurn;
+        SelectedPiece = null;
+        ValidMoves.Clear();
+        Invalidate();
+    }
+
+    /// <summary>
+    /// Áp dụng kết quả nước đi đã được Server thẩm định qua sự kiện 'move_made'.
+    /// </summary>
+    public (PieceView? ActingPiece, List<PieceView> CapturedPieces) ApplyServerMove(ServerMoveDetailDto move, string? nextTurn)
+    {
+        var actingPiece = Pieces.FirstOrDefault(p => p.PieceId == move.PieceId);
+        var capturedPieces = new List<PieceView>();
+
+        foreach (var capId in move.Captured)
+        {
+            var cap = Pieces.FirstOrDefault(p => p.PieceId == capId);
+            if (cap != null)
+            {
+                cap.IsAlive = false;
+                capturedPieces.Add(cap);
+
+                if (cap.Kind == PieceKind.Commander && actingPiece != null)
+                {
+                    actingPiece.IsHero = true;
+                    actingPiece.Score += 10;
+                }
+            }
+        }
+
+        if (!move.StandShoot && move.To.Count >= 2)
+        {
+            int destX = move.To[0];
+            int destY = move.To[1];
+
+            if (move.Moved.Count > 0)
+            {
+                foreach (var movedId in move.Moved)
+                {
+                    var mp = Pieces.FirstOrDefault(p => p.PieceId == movedId);
+                    if (mp != null)
+                    {
+                        mp.X = destX;
+                        mp.Y = destY;
+                    }
+                }
+            }
+            else if (actingPiece != null)
+            {
+                actingPiece.X = destX;
+                actingPiece.Y = destY;
+            }
+        }
+
+        if (move.AttackerDestroyed && actingPiece != null)
+        {
+            actingPiece.IsAlive = false;
+        }
+
+        if (!string.IsNullOrEmpty(nextTurn))
+        {
+            CurrentTurn = nextTurn;
+        }
+
+        SelectedPiece = null;
+        ValidMoves.Clear();
+        Invalidate();
+        return (actingPiece, capturedPieces);
+    }
+
+    public void ClearSelection()
+    {
+        SelectedPiece = null;
+        ValidMoves.Clear();
+        OnPieceSelected?.Invoke(null);
+        OnStackedGroupSelected?.Invoke(new List<PieceView>());
+        Invalidate();
+    }
+
+    /// <summary>
+    /// Quy tắc Quân Anh Hùng theo Rule.pdf (Chế độ Offline Beta1):
     /// 1) Quân trực tiếp chiếu Tư lệnh đối phương được phong Anh hùng (+1 tầm, +10đ, đi chéo 45°, máy bay tàng hình)
     /// 2) Quân cuối cùng còn lại bảo vệ Tư lệnh của mỗi bên cũng được phong Anh hùng (kể cả Sở chỉ huy)
     /// </summary>
@@ -1699,7 +1810,15 @@ public class BoardControl : UserControl
         int gy = grid.Value.Y;
 
         var piecesAtTile = GetPiecesAt(gx, gy);
-        var friendlyPieces = piecesAtTile.Where(p => p.Side == CurrentTurn).ToList();
+
+        // Khi đấu Online: chỉ được điều khiển quân thuộc phe của mình và khi đang tới lượt phe mình
+        if (IsOnlineMode && CurrentTurn != PlayerSide)
+        {
+            return;
+        }
+
+        string controllableSide = IsOnlineMode ? PlayerSide : CurrentTurn;
+        var friendlyPieces = piecesAtTile.Where(p => p.Side == controllableSide).ToList();
 
         if (SelectedPiece == null)
         {
@@ -1746,19 +1865,23 @@ public class BoardControl : UserControl
                 }
                 else if (ValidMoves.Any(m => m.X == gx && m.Y == gy))
                 {
-                    // Nước đi nằm trong danh sách HỢP LỆ -> Thực hiện đi quân
+                    // Nước đi nằm trong danh sách HỢP LỆ -> Gửi lên Server (nếu Online) hoặc đi cục bộ (nếu Offline)
                     var movingPiece = SelectedPiece;
-                    MovePiece(movingPiece.PieceId, gx, gy);
-                    OnStackedGroupSelected?.Invoke(new List<PieceView>());
+                    if (IsOnlineMode)
+                    {
+                        OnOnlineMoveRequested?.Invoke(movingPiece, gx, gy, CurrentCaptureMode, MoveStackTogether);
+                        ClearSelection();
+                    }
+                    else
+                    {
+                        MovePiece(movingPiece.PieceId, gx, gy);
+                        OnStackedGroupSelected?.Invoke(new List<PieceView>());
+                    }
                 }
                 else
                 {
                     // Click vào ô không hợp lệ -> Bỏ chọn
-                    SelectedPiece = null;
-                    ValidMoves.Clear();
-                    OnPieceSelected?.Invoke(null);
-                    OnStackedGroupSelected?.Invoke(new List<PieceView>());
-                    Invalidate();
+                    ClearSelection();
                 }
         }
     }

@@ -38,7 +38,37 @@ partial class LoginForm
         lnkForgotPassword = new LinkLabel();
         lblErrorMessage = new Label();
         lblTitle = new Label();
+        lblServerUrl = new Label();
+        txtServerUrl = new TextBox();
+        lblServerHint = new Label();
         SuspendLayout();
+        // 
+        // lblServerUrl
+        // 
+        lblServerUrl.AutoSize = true;
+        lblServerUrl.Location = new Point(289, 136);
+        lblServerUrl.Name = "lblServerUrl";
+        lblServerUrl.Size = new Size(118, 15);
+        lblServerUrl.TabIndex = 9;
+        lblServerUrl.Text = "Máy chủ (IP / LAN):";
+        // 
+        // txtServerUrl
+        // 
+        txtServerUrl.Location = new Point(435, 133);
+        txtServerUrl.Name = "txtServerUrl";
+        txtServerUrl.PlaceholderText = "http://192.168.1.x:5000";
+        txtServerUrl.Size = new Size(184, 23);
+        txtServerUrl.TabIndex = 0;
+        // 
+        // lblServerHint
+        // 
+        lblServerHint.AutoSize = true;
+        lblServerHint.Font = new Font("Segoe UI", 8.5F, FontStyle.Italic);
+        lblServerHint.ForeColor = Color.DimGray;
+        lblServerHint.Location = new Point(628, 136);
+        lblServerHint.Name = "lblServerHint";
+        lblServerHint.Size = new Size(165, 15);
+        lblServerHint.Text = "(VD: 192.168.1.15:5000)";
         // 
         // label1
         // 
@@ -155,6 +185,9 @@ partial class LoginForm
         AutoScaleDimensions = new SizeF(7F, 15F);
         AutoScaleMode = AutoScaleMode.Font;
         ClientSize = new Size(1021, 483);
+        Controls.Add(lblServerHint);
+        Controls.Add(txtServerUrl);
+        Controls.Add(lblServerUrl);
         Controls.Add(lblTitle);
         Controls.Add(lblErrorMessage);
         Controls.Add(lnkForgotPassword);
@@ -166,7 +199,7 @@ partial class LoginForm
         Controls.Add(txtUsername);
         Controls.Add(label1);
         Name = "LoginForm";
-        Text = "Form1";
+        Text = "Cờ Tư Lệnh Online - Đăng Nhập";
         Load += Form1_Load;
         ResumeLayout(false);
         PerformLayout();
@@ -174,6 +207,9 @@ partial class LoginForm
 
     #endregion
 
+    private Label lblServerUrl;
+    private TextBox txtServerUrl;
+    private Label lblServerHint;
     private Label label1;
     private TextBox txtUsername;
     private Label label2;
