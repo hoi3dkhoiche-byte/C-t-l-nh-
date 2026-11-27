@@ -1220,6 +1220,53 @@ def handle_request_leaderboard():
     socketio.emit("leaderboard_updated", {"leaderboard": top}, to=request.sid)
 
 
+# =============================================================================
+# CHAT TRONG PHÒNG / TRONG TRẬN
+# =============================================================================
+
+CHAT_MAX_LENGTH = 200     # số ký tự tối đa mỗi tin
+CHAT_MIN_INTERVAL = 1.0   # số giây tối thiểu giữa 2 tin của một người
+last_chat_at = {}         # user_id -> lần gửi gần nhất, để chống spam
+
+
+@socketio.on("chat")
+def handle_chat(data=None):
+    # Người gửi và phòng lấy từ phiên socket, không tin dữ liệu client gửi lên
+    user_id = connected_users.get(request.sid)
+    room_code = user_rooms.get(request.sid)
+    if user_id is None or room_code is None:
+        emit("chat_rejected", {"reason": "NOT_IN_ROOM"})
+        return
+
+    message = (data or {}).get("message")
+    if not isinstance(message, str) or not message.strip():
+        emit("chat_rejected", {"reason": "EMPTY"})
+        return
+    message = message.strip()
+    if len(message) > CHAT_MAX_LENGTH:
+        emit("chat_rejected", {"reason": "TOO_LONG"})
+        return
+
+    now = time.monotonic()
+    if now - last_chat_at.get(user_id, 0) < CHAT_MIN_INTERVAL:
+        emit("chat_rejected", {"reason": "TOO_FAST"})
+        return
+    last_chat_at[user_id] = now
+
+    user = db.session.get(User, user_id)
+    # Phát cho cả phòng, kể cả người gửi
+    emit(
+        "chat_message",
+        {
+            "user_id": user_id,
+            "username": user.username,
+            "message": message,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        },
+        to=room_code,
+    )
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "5000"))

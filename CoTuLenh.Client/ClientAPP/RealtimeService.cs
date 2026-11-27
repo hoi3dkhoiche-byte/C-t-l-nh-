@@ -29,7 +29,11 @@ public sealed class RealtimeService
             {
                 Reconnection = true,
                 ReconnectionAttempts = 10,
-                ConnectionTimeout = TimeSpan.FromSeconds(5)
+                ConnectionTimeout = TimeSpan.FromSeconds(5),
+                // Gửi JWT để server biết socket này là user nào
+                Auth = new { token = SessionService.Instance.Token },
+                // Nối thẳng websocket: bước nâng cấp từ polling của thư viện không khớp server Python
+                Transport = SocketIOClient.Common.TransportProtocol.WebSocket
             });
 
             _socket.OnConnected += (sender, e) =>
@@ -47,7 +51,8 @@ public sealed class RealtimeService
             {
                 try
                 {
-                    string rawJson = response.ToString() ?? "";
+                    // SocketIOClient 4.x: ToString() không ra JSON, phải lấy phần tử dữ liệu đầu tiên
+                    string rawJson = response.GetValue<JsonElement>(0).GetRawText();
                     if (string.IsNullOrWhiteSpace(rawJson)) return;
 
                     using var doc = JsonDocument.Parse(rawJson);
@@ -100,6 +105,8 @@ public sealed class RealtimeService
                 await Task.CompletedTask;
             });
 
+            RegisterRoomAndChatEvents(_socket);
+
             await _socket.ConnectAsync();
         }
         catch
@@ -122,5 +129,125 @@ public sealed class RealtimeService
         {
             await _socket.DisconnectAsync();
         }
+    }
+
+    // =====================================================================
+    // PHÒNG + CHAT
+    // =====================================================================
+
+    public event Action<ChatMessageModel>? OnChatMessage;   // có tin chat mới (kể cả tin của mình)
+    public event Action<string>? OnChatRejected;            // tin bị từ chối, kèm lý do
+    public event Action<string>? OnRoomNotice;              // thông báo về phòng
+
+    // Handler chạy trên luồng socket, form nhận event phải Invoke về luồng UI
+    private void RegisterRoomAndChatEvents(SocketIO socket)
+    {
+        socket.On("chat_message", async response =>
+        {
+            try
+            {
+                var msg = response.GetValue<ChatMessageModel>(0);
+                if (msg != null) OnChatMessage?.Invoke(msg);
+            }
+            catch
+            {
+                // Bỏ qua gói tin sai định dạng
+            }
+            await Task.CompletedTask;
+        });
+
+        socket.On("chat_rejected", async response =>
+        {
+            string reason = ReadString(response, "reason");
+            OnChatRejected?.Invoke(reason switch
+            {
+                "NOT_IN_ROOM" => "Bạn chưa vào phòng nên chưa chat được",
+                "EMPTY" => "Tin nhắn trống",
+                "TOO_LONG" => "Tin nhắn quá dài (tối đa 200 ký tự)",
+                "TOO_FAST" => "Bạn gửi nhanh quá, đợi 1 giây",
+                _ => "Không gửi được tin nhắn",
+            });
+            await Task.CompletedTask;
+        });
+
+        socket.On("room_joined", async response =>
+        {
+            string color = ReadString(response, "your_color") == "red" ? "Đỏ" : "Xanh";
+            OnRoomNotice?.Invoke($"Đã kết nối phòng {ReadString(response, "room_code")}, bạn cầm phe {color}");
+            await Task.CompletedTask;
+        });
+
+        socket.On("join_pending", async response =>
+        {
+            OnRoomNotice?.Invoke("Đang chờ chủ phòng duyệt...");
+            await Task.CompletedTask;
+        });
+
+        socket.On("player_joined", async response =>
+        {
+            OnRoomNotice?.Invoke("Đối thủ đã vào phòng");
+            await Task.CompletedTask;
+        });
+
+        socket.On("player_left", async response =>
+        {
+            OnRoomNotice?.Invoke("Đối thủ đã rời phòng");
+            await Task.CompletedTask;
+        });
+
+        socket.On("error", async response =>
+        {
+            OnRoomNotice?.Invoke("Lỗi: " + ReadString(response, "message"));
+            await Task.CompletedTask;
+        });
+    }
+
+    // Đọc một trường chuỗi trong dữ liệu event, không có thì trả ""
+    private static string ReadString(IEventContext response, string name)
+    {
+        try
+        {
+            var root = response.GetValue<JsonElement>(0);
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty(name, out var value))
+            {
+                return value.ToString();
+            }
+        }
+        catch
+        {
+            // Event không có dữ liệu
+        }
+        return "";
+    }
+
+    public async Task<bool> JoinRoomAsync(string roomCode)
+    {
+        // Kết nối lúc đăng nhập có thể chưa xong hoặc đã rớt
+        if (_socket == null || !_socket.Connected)
+        {
+            await ConnectAsync();
+        }
+        if (_socket == null || !_socket.Connected) return false;
+
+        await _socket.EmitAsync("join_room", new object[] { new { room_code = roomCode } });
+        return true;
+    }
+
+    // Đang trong trận thì server tính là bỏ ván
+    public async Task LeaveRoomAsync()
+    {
+        if (_socket != null && _socket.Connected)
+        {
+            await _socket.EmitAsync("leave_room");
+        }
+    }
+
+    // Không tự hiện tin, đợi server phát lại qua "chat_message"
+    public async Task<bool> SendChatAsync(string message)
+    {
+        if (_socket == null || !_socket.Connected) return false;
+
+        await _socket.EmitAsync("chat", new object[] { new { message } });
+        return true;
     }
 }
