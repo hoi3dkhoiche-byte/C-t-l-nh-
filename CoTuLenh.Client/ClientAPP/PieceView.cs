@@ -84,6 +84,19 @@ public class PieceView
         }
     }
 
+    /// <summary>
+    /// Vẽ quân cờ thu nhỏ (giữ nguyên tỉ lệ logo vector sắc nét)
+    /// </summary>
+    public void DrawScaled(Graphics g, Rectangle targetRect)
+    {
+        var state = g.Save();
+        const float baseSize = 40f;
+        g.TranslateTransform(targetRect.X, targetRect.Y);
+        g.ScaleTransform(targetRect.Width / baseSize, targetRect.Height / baseSize);
+        Draw(g, new Rectangle(0, 0, (int)baseSize, (int)baseSize));
+        g.Restore(state);
+    }
+
     private void DrawPieceIcon(Graphics g, Rectangle rect)
     {
         int cx = rect.X + rect.Width / 2;

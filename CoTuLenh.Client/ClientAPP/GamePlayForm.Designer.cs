@@ -33,21 +33,6 @@ partial class GamePlayForm
     private Panel pnlTurn;
     private Label lblTurn;
 
-    // Capture Mode Panel (Khung đổi chế độ ăn quân)
-    private Panel pnlCaptureMode;
-    private Label lblCaptureModeTitle;
-    private Label lblCurrentPieceCapture;
-    private Label lblCaptureModeStatus;
-    private Button btnToggleCaptureMode;
-    private Label lblCaptureModeHelp;
-
-    // Stack Selection Panel (Khung chọn quân trong nhóm xếp chồng)
-    private Panel pnlStackSelect;
-    private Label lblStackTitle;
-    private Label lblStackInfo;
-    private FlowLayoutPanel flowStackPieces;
-    private CheckBox chkMoveStackTogether;
-
     // Right Controls
     private Label lblLogTitle;
     private ListBox lstMoveLog;
@@ -80,19 +65,6 @@ partial class GamePlayForm
         pnlTurn = new Panel();
         lblTurn = new Label();
 
-        pnlCaptureMode = new Panel();
-        lblCaptureModeTitle = new Label();
-        lblCurrentPieceCapture = new Label();
-        lblCaptureModeStatus = new Label();
-        btnToggleCaptureMode = new Button();
-        lblCaptureModeHelp = new Label();
-
-        pnlStackSelect = new Panel();
-        lblStackTitle = new Label();
-        lblStackInfo = new Label();
-        flowStackPieces = new FlowLayoutPanel();
-        chkMoveStackTogether = new CheckBox();
-
         lblLogTitle = new Label();
         lstMoveLog = new ListBox();
         lblChatTitle = new Label();
@@ -110,8 +82,6 @@ partial class GamePlayForm
         pnlOpponent.SuspendLayout();
         pnlPlayer.SuspendLayout();
         pnlTurn.SuspendLayout();
-        pnlCaptureMode.SuspendLayout();
-        pnlStackSelect.SuspendLayout();
         pnlRight.SuspendLayout();
         SuspendLayout();
 
@@ -123,8 +93,6 @@ partial class GamePlayForm
         pnlLeft.BackColor = Color.FromArgb(235, 240, 245);
         pnlLeft.Padding = new Padding(8);
         pnlLeft.AutoScroll = true;
-        pnlLeft.Controls.Add(pnlStackSelect);
-        pnlLeft.Controls.Add(pnlCaptureMode);
         pnlLeft.Controls.Add(pnlTurn);
         pnlLeft.Controls.Add(pnlOpponent);
         pnlLeft.Controls.Add(pnlPlayer);
@@ -139,13 +107,13 @@ partial class GamePlayForm
         pnlOpponent.Controls.Add(lblOpponentScore);
         pnlOpponent.SendToBack();
 
-        lblOpponentName.Text = "🔵 Đối thủ (Xanh)";
+        lblOpponentName.Text = "Đối thủ (Xanh)";
         lblOpponentName.Font = new Font("Segoe UI", 10.5F, FontStyle.Bold);
         lblOpponentName.ForeColor = Color.FromArgb(41, 128, 185);
         lblOpponentName.Location = new Point(8, 8);
         lblOpponentName.AutoSize = true;
 
-        lblOpponentTimer.Text = "⏱ 00:45";
+        lblOpponentTimer.Text = "00:45";
         lblOpponentTimer.Font = new Font("Segoe UI", 15F, FontStyle.Bold);
         lblOpponentTimer.ForeColor = Color.FromArgb(44, 62, 80);
         lblOpponentTimer.Location = new Point(8, 38);
@@ -170,91 +138,6 @@ partial class GamePlayForm
         lblTurn.TextAlign = ContentAlignment.MiddleCenter;
         lblTurn.Dock = DockStyle.Fill;
 
-        // pnlCaptureMode (Khung đổi chế độ ăn quân)
-        pnlCaptureMode.Dock = DockStyle.Top;
-        pnlCaptureMode.Height = 140;
-        pnlCaptureMode.BackColor = Color.White;
-        pnlCaptureMode.BorderStyle = BorderStyle.FixedSingle;
-        pnlCaptureMode.Controls.Add(lblCaptureModeHelp);
-        pnlCaptureMode.Controls.Add(btnToggleCaptureMode);
-        pnlCaptureMode.Controls.Add(lblCaptureModeStatus);
-        pnlCaptureMode.Controls.Add(lblCurrentPieceCapture);
-        pnlCaptureMode.Controls.Add(lblCaptureModeTitle);
-        pnlCaptureMode.SendToBack();
-
-        lblCaptureModeTitle.Text = "⚔️ CHẾ ĐỘ ĂN QUÂN";
-        lblCaptureModeTitle.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
-        lblCaptureModeTitle.ForeColor = Color.FromArgb(31, 58, 95);
-        lblCaptureModeTitle.Location = new Point(8, 6);
-        lblCaptureModeTitle.AutoSize = true;
-
-        lblCurrentPieceCapture.Text = "Quân: Chưa chọn";
-        lblCurrentPieceCapture.Font = new Font("Segoe UI", 8.5F, FontStyle.Regular);
-        lblCurrentPieceCapture.ForeColor = Color.FromArgb(52, 73, 94);
-        lblCurrentPieceCapture.Location = new Point(8, 27);
-        lblCurrentPieceCapture.AutoSize = true;
-
-        lblCaptureModeStatus.Text = "🎯 Ăn thế chỗ mục tiêu";
-        lblCaptureModeStatus.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
-        lblCaptureModeStatus.ForeColor = Color.FromArgb(192, 57, 43);
-        lblCaptureModeStatus.Location = new Point(8, 47);
-        lblCaptureModeStatus.AutoSize = true;
-
-        btnToggleCaptureMode.Text = "🔄 ĐỔI CHẾ ĐỘ ĂN";
-        btnToggleCaptureMode.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
-        btnToggleCaptureMode.BackColor = Color.FromArgb(39, 174, 96);
-        btnToggleCaptureMode.ForeColor = Color.White;
-        btnToggleCaptureMode.FlatStyle = FlatStyle.Flat;
-        btnToggleCaptureMode.Location = new Point(8, 69);
-        btnToggleCaptureMode.Size = new Size(230, 30);
-        btnToggleCaptureMode.Cursor = Cursors.Hand;
-        btnToggleCaptureMode.Enabled = false;
-
-        lblCaptureModeHelp.Text = "• Bấm nút trên để đổi giữa Ăn thế chỗ và Bắn tại chỗ / Bay về.";
-        lblCaptureModeHelp.Font = new Font("Segoe UI", 7.5F, FontStyle.Italic);
-        lblCaptureModeHelp.ForeColor = Color.Gray;
-        lblCaptureModeHelp.Location = new Point(8, 103);
-        lblCaptureModeHelp.Size = new Size(230, 32);
-
-        // pnlStackSelect (Khung chọn quân trong nhóm xếp chồng)
-        pnlStackSelect.Dock = DockStyle.Top;
-        pnlStackSelect.Height = 180;
-        pnlStackSelect.BackColor = Color.White;
-        pnlStackSelect.BorderStyle = BorderStyle.FixedSingle;
-        pnlStackSelect.Controls.Add(chkMoveStackTogether);
-        pnlStackSelect.Controls.Add(flowStackPieces);
-        pnlStackSelect.Controls.Add(lblStackInfo);
-        pnlStackSelect.Controls.Add(lblStackTitle);
-        pnlStackSelect.SendToBack();
-
-        lblStackTitle.Text = "🎖️ NHÓM QUÂN XẾP CHỒNG";
-        lblStackTitle.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
-        lblStackTitle.ForeColor = Color.FromArgb(211, 84, 0);
-        lblStackTitle.Location = new Point(8, 6);
-        lblStackTitle.AutoSize = true;
-
-        lblStackInfo.Text = "Nhấp vào ô có nhóm quân để chọn quân:";
-        lblStackInfo.Font = new Font("Segoe UI", 7.5F, FontStyle.Regular);
-        lblStackInfo.ForeColor = Color.DimGray;
-        lblStackInfo.Location = new Point(8, 26);
-        lblStackInfo.Size = new Size(230, 24);
-
-        flowStackPieces.Location = new Point(8, 50);
-        flowStackPieces.Size = new Size(230, 94);
-        flowStackPieces.FlowDirection = FlowDirection.TopDown;
-        flowStackPieces.WrapContents = false;
-        flowStackPieces.AutoScroll = true;
-        flowStackPieces.BorderStyle = BorderStyle.FixedSingle;
-        flowStackPieces.BackColor = Color.FromArgb(248, 249, 250);
-
-        chkMoveStackTogether.Text = "Cõng cả cụm khi di chuyển";
-        chkMoveStackTogether.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
-        chkMoveStackTogether.ForeColor = Color.FromArgb(44, 62, 80);
-        chkMoveStackTogether.Location = new Point(8, 148);
-        chkMoveStackTogether.Size = new Size(230, 24);
-        chkMoveStackTogether.Checked = true;
-        chkMoveStackTogether.Visible = false;
-
         // pnlPlayer
         pnlPlayer.Dock = DockStyle.Bottom;
         pnlPlayer.Height = 115;
@@ -264,13 +147,13 @@ partial class GamePlayForm
         pnlPlayer.Controls.Add(lblPlayerTimer);
         pnlPlayer.Controls.Add(lblPlayerScore);
 
-        lblPlayerName.Text = "🔴 Tôi (Đỏ)";
+        lblPlayerName.Text = "Tôi (Đỏ)";
         lblPlayerName.Font = new Font("Segoe UI", 10.5F, FontStyle.Bold);
         lblPlayerName.ForeColor = Color.FromArgb(192, 57, 43);
         lblPlayerName.Location = new Point(8, 8);
         lblPlayerName.AutoSize = true;
 
-        lblPlayerTimer.Text = "⏱ 00:45";
+        lblPlayerTimer.Text = "00:45";
         lblPlayerTimer.Font = new Font("Segoe UI", 15F, FontStyle.Bold);
         lblPlayerTimer.ForeColor = Color.FromArgb(44, 62, 80);
         lblPlayerTimer.Location = new Point(8, 38);
@@ -381,10 +264,6 @@ partial class GamePlayForm
         pnlPlayer.ResumeLayout(false);
         pnlPlayer.PerformLayout();
         pnlTurn.ResumeLayout(false);
-        pnlCaptureMode.ResumeLayout(false);
-        pnlCaptureMode.PerformLayout();
-        pnlStackSelect.ResumeLayout(false);
-        pnlStackSelect.PerformLayout();
         pnlRight.ResumeLayout(false);
         pnlRight.PerformLayout();
         ResumeLayout(false);

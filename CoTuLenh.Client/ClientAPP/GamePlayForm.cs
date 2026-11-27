@@ -20,9 +20,7 @@ public partial class GamePlayForm : BaseForm
         this.FormClosed += GamePlayForm_FormClosed;
 
         board.OnPieceMoved += Board_OnPieceMoved;
-        board.OnPieceSelected += Board_OnPieceSelected;
-        board.OnCaptureModeChanged += Board_OnCaptureModeChanged;
-        board.OnStackedGroupSelected += Board_OnStackedGroupSelected;
+        board.OnFreeAntiAirStrike += Board_OnFreeAntiAirStrike;
         board.OnFireRingInspected += Board_OnFireRingInspected;
 
         gameTimer.Interval = 1000;
@@ -32,13 +30,13 @@ public partial class GamePlayForm : BaseForm
     private void GamePlayForm_Load(object? sender, EventArgs e)
     {
         var user = SessionService.Instance.CurrentUser?.Username ?? "Tôi";
-        lblPlayerName.Text = $"🔴 {user} (Đỏ)";
-        lblOpponentName.Text = $"🔵 {_room.GuestUsername ?? "Đối thủ"} (Xanh)";
+        lblPlayerName.Text = $"{user} (Đỏ)";
+        lblOpponentName.Text = $"{_room.GuestUsername ?? "Đối thủ"} (Xanh)";
 
         // Đồng hồ tổng trận đấu 30 phút (Chế độ Tấn công tổng lực)
         lblMatchTimer = new Label
         {
-            Text = "⏳ TỔNG LỰC: 30:00",
+            Text = "TỔNG LỰC: 30:00",
             Location = new Point(10, 568),
             Size = new Size(240, 28),
             TextAlign = ContentAlignment.MiddleCenter,
@@ -51,7 +49,7 @@ public partial class GamePlayForm : BaseForm
         // Nút chuyển đổi chế độ Bot / Tự cầm 2 bên
         btnToggleBot = new Button
         {
-            Text = isBotEnabled ? "🤖 Bot: ĐANG BẬT" : "👤 Chế độ: TỰ CẦM 2 BÊN",
+            Text = isBotEnabled ? "Bot: ĐANG BẬT" : "Chế độ: TỰ CẦM 2 BÊN",
             Location = new Point(10, 605),
             Size = new Size(240, 36),
             BackColor = isBotEnabled ? Color.FromArgb(39, 174, 96) : Color.FromArgb(41, 128, 185),
@@ -62,7 +60,7 @@ public partial class GamePlayForm : BaseForm
         btnToggleBot.Click += (s, ev) =>
         {
             isBotEnabled = !isBotEnabled;
-            btnToggleBot.Text = isBotEnabled ? "🤖 Bot: ĐANG BẬT" : "👤 Chế độ: TỰ CẦM 2 BÊN";
+            btnToggleBot.Text = isBotEnabled ? "Bot: ĐANG BẬT" : "Chế độ: TỰ CẦM 2 BÊN";
             btnToggleBot.BackColor = isBotEnabled ? Color.FromArgb(39, 174, 96) : Color.FromArgb(41, 128, 185);
             lstChat.Items.Add(isBotEnabled ? "[Hệ thống] Đã BẬT Bot tự đánh cho phe Xanh." : "[Hệ thống] Đã TẮT Bot (Bạn tự điều khiển cả 2 bên).");
             if (isBotEnabled && board.CurrentTurn == "blue")
@@ -72,25 +70,12 @@ public partial class GamePlayForm : BaseForm
         };
         pnlRight.Controls.Add(btnToggleBot);
 
-        // Sự kiện khung chế độ ăn quân và nhóm quân xếp chồng
-        btnToggleCaptureMode.Click += (s, ev) => board.ToggleCaptureMode();
-        chkMoveStackTogether.CheckedChanged += (s, ev) =>
-        {
-            board.MoveStackTogether = chkMoveStackTogether.Checked;
-            lstChat.Items.Add(board.MoveStackTogether
-                ? "[Ghép quân] Đã BẬT: Cõng theo cả cụm khi di chuyển."
-                : "[Ghép quân] Đã TẮT: Tách quân di chuyển riêng lẻ.");
-            lstChat.TopIndex = lstChat.Items.Count - 1;
-        };
-
         lstChat.Items.Add("[Hệ thống] Trận đấu Cờ Tư Lệnh bắt đầu! (Chế độ: TẤN CÔNG TỔNG LỰC - 30 phút)");
         lstChat.Items.Add("[Hệ thống] Điều kiện thắng: Diệt Tư lệnh đối phương (+50đ) hoặc hơn tổng điểm sau 30 phút.");
         lstChat.Items.Add("[Hệ thống] Lượt đầu tiên: PHE ĐỎ");
 
         UpdateTurnDisplay();
         UpdateScores();
-        UpdateCaptureModeDisplay();
-        UpdateStackSelectDisplay(new List<PieceView>());
         gameTimer.Start();
     }
 
@@ -110,7 +95,7 @@ public partial class GamePlayForm : BaseForm
         {
             int mins = Math.Max(0, totalMatchSeconds) / 60;
             int secs = Math.Max(0, totalMatchSeconds) % 60;
-            lblMatchTimer.Text = $"⏳ TỔNG LỰC: {mins:D2}:{secs:D2}";
+            lblMatchTimer.Text = $"TỔNG LỰC: {mins:D2}:{secs:D2}";
         }
 
         if (totalMatchSeconds <= 0)
@@ -134,17 +119,17 @@ public partial class GamePlayForm : BaseForm
 
         // 2. Đếm ngược 45 giây mỗi lượt
         currentTurnSeconds--;
-        string timeStr = $"⏱ 00:{currentTurnSeconds:D2}";
+        string timeStr = $"00:{currentTurnSeconds:D2}";
 
         if (board.CurrentTurn == "red")
         {
             lblPlayerTimer.Text = timeStr;
-            lblOpponentTimer.Text = "⏱ 00:45";
+            lblOpponentTimer.Text = "00:45";
         }
         else
         {
             lblOpponentTimer.Text = timeStr;
-            lblPlayerTimer.Text = "⏱ 00:45";
+            lblPlayerTimer.Text = "00:45";
         }
 
         if (currentTurnSeconds <= 0)
@@ -153,42 +138,8 @@ public partial class GamePlayForm : BaseForm
             // Hết giờ -> Đổi lượt
             board.CurrentTurn = board.CurrentTurn == "red" ? "blue" : "red";
             UpdateTurnDisplay();
-            UpdateCaptureModeDisplay();
-            UpdateStackSelectDisplay(new List<PieceView>());
             lstChat.Items.Add("[Hệ thống] Hết thời gian lượt đi!");
         }
-    }
-
-    private void Board_OnPieceSelected(PieceView? piece)
-    {
-        UpdateCaptureModeDisplay();
-        if (piece == null)
-        {
-            UpdateStackSelectDisplay(new List<PieceView>());
-        }
-        else
-        {
-            var stacked = board.GetPiecesAt(piece.X, piece.Y);
-            if (stacked.Count > 1)
-            {
-                UpdateStackSelectDisplay(stacked);
-            }
-            else
-            {
-                UpdateStackSelectDisplay(new List<PieceView>());
-            }
-        }
-    }
-
-    private void Board_OnStackedGroupSelected(List<PieceView> pieces)
-    {
-        UpdateStackSelectDisplay(pieces);
-        UpdateCaptureModeDisplay();
-    }
-
-    private void Board_OnCaptureModeChanged(CaptureMode mode)
-    {
-        UpdateCaptureModeDisplay();
     }
 
     private void Board_OnFireRingInspected(PieceView? piece)
@@ -197,7 +148,7 @@ public partial class GamePlayForm : BaseForm
         {
             string sideStr = piece.Side == "red" ? "Phe Đỏ" : "Phe Xanh";
             float radius = BoardControl.GetFireRingRadius(piece.Kind);
-            lstChat.Items.Add($"[Trinh sát] 🔥 Đang soi vành đai lửa của {piece.DisplayName} ({sideStr}) - Bán kính {radius} nấc.");
+            lstChat.Items.Add($"[Trinh sát] Đang soi vành đai lửa của {piece.DisplayName} ({sideStr}) - Bán kính {radius} nấc.");
         }
         else
         {
@@ -206,155 +157,47 @@ public partial class GamePlayForm : BaseForm
         lstChat.TopIndex = lstChat.Items.Count - 1;
     }
 
-    private void UpdateCaptureModeDisplay()
+    private void Board_OnFreeAntiAirStrike(PieceView piece, int toX, int toY, PieceView? capturedPiece)
     {
-        var piece = board.SelectedPiece;
-        if (piece != null)
-        {
-            string sideStr = piece.Side == "red" ? "Đỏ" : "Xanh";
-            lblCurrentPieceCapture.Text = $"Quân: {piece.DisplayName} ({sideStr})";
+        string capInfo = capturedPiece != null ? $" [Ăn: {capturedPiece.DisplayName}]" : "";
+        lstMoveLog.Items.Add($"{moveCount++}. {piece.DisplayName} ({piece.Side}) Phòng không (Không tốn lượt) -> ({toX}, {toY}){capInfo}");
+        lstMoveLog.TopIndex = lstMoveLog.Items.Count - 1;
 
-            if (piece.Kind == PieceKind.AirForce)
-            {
-                btnToggleCaptureMode.Enabled = false;
-                lblCaptureModeStatus.Text = "🛩️ Tự động theo mục tiêu";
-                lblCaptureModeStatus.ForeColor = Color.FromArgb(41, 128, 185);
-                btnToggleCaptureMode.Text = "🔄 TỰ ĐỘNG THEO TÌNH HUỐNG";
-                btnToggleCaptureMode.BackColor = Color.Gray;
-                lblCaptureModeHelp.Text = "• Không quân: Thế chỗ nếu địch là Không quân; Cảm tử nếu trong vành đai lửa; Ném bom từ xa nếu ngoài vành đai.";
-            }
-            else if (BoardControl.HasMultipleCaptureModes(piece.Kind))
-            {
-                btnToggleCaptureMode.Enabled = true;
-                if (board.CurrentCaptureMode == CaptureMode.Occupy)
-                {
-                    lblCaptureModeStatus.Text = "🎯 Chế độ: THẾ CHỖ MỤC TIÊU";
-                    lblCaptureModeStatus.ForeColor = Color.FromArgb(192, 57, 43);
-                    btnToggleCaptureMode.Text = "🔄 ĐỔI: BẮN TẠI CHỖ / BAY VỀ";
-                    btnToggleCaptureMode.BackColor = Color.FromArgb(41, 128, 185);
-                }
-                else
-                {
-                    lblCaptureModeStatus.Text = "💥 Chế độ: BẮN TẠI CHỖ / BAY VỀ";
-                    lblCaptureModeStatus.ForeColor = Color.FromArgb(211, 84, 0);
-                    btnToggleCaptureMode.Text = "🔄 ĐỔI: THẾ CHỖ MỤC TIÊU";
-                    btnToggleCaptureMode.BackColor = Color.FromArgb(230, 126, 34);
-                }
+        UpdateScores();
 
-                lblCaptureModeHelp.Text = piece.Kind switch
-                {
-                    PieceKind.Artillery => "• Bắn tại chỗ: đứng tại chỗ nã pháo tiêu diệt từ xa (1-3 nấc).",
-                    PieceKind.Warship => "• Hải quân: Thế chỗ trên biển/bờ (chéo 45° gặp Hải quân địch có thể Xạ kích 4 ô); Xạ kích đất liền (3 ô).",
-                    PieceKind.Tank => "• Bắn tại chỗ: đứng trên bờ bắn tiêu diệt mục tiêu ven biển/hải quân.",
-                    _ => "• Chuyển đổi giữa ăn thế chỗ và bắn tại chỗ."
-                };
-            }
-            else
-            {
-                btnToggleCaptureMode.Enabled = false;
-                lblCaptureModeStatus.Text = "🎯 Ăn thế chỗ (Mặc định)";
-                lblCaptureModeStatus.ForeColor = Color.FromArgb(44, 62, 80);
-                btnToggleCaptureMode.Text = "🔄 ĐỔI CHẾ ĐỘ ĂN";
-                btnToggleCaptureMode.BackColor = Color.Gray;
-                lblCaptureModeHelp.Text = "• Quân này chỉ có 1 chế độ ăn tiêu chuẩn (Thế chỗ).";
-            }
-        }
-        else
+        // Kiểm tra nếu Tư lệnh đang ngồi trên Không quân bị bắn hạ
+        var blueCmd = board.Pieces.FirstOrDefault(p => p.PieceId == "b_cmd");
+        if (blueCmd != null && !blueCmd.IsAlive)
         {
-            lblCurrentPieceCapture.Text = "Quân: Chưa chọn";
-            btnToggleCaptureMode.Enabled = false;
-            lblCaptureModeStatus.Text = board.CurrentCaptureMode == CaptureMode.Occupy
-                ? "🎯 Ăn thế chỗ mục tiêu"
-                : "💥 Bắn tại chỗ / Bay về";
-            lblCaptureModeStatus.ForeColor = Color.Gray;
-            btnToggleCaptureMode.Text = "🔄 ĐỔI CHẾ ĐỘ ĂN";
-            btnToggleCaptureMode.BackColor = Color.Gray;
-            lblCaptureModeHelp.Text = "• Chọn một quân cờ trên bàn cờ để xem hoặc đổi chế độ ăn.";
-        }
-    }
-
-    private void UpdateStackSelectDisplay(List<PieceView> pieces)
-    {
-        flowStackPieces.Controls.Clear();
-        if (pieces == null || pieces.Count <= 1)
-        {
-            lblStackTitle.Text = "🎖️ NHÓM QUÂN XẾP CHỒNG";
-            lblStackInfo.Text = "Nhấp vào ô có nhóm quân để chọn quân:";
-            chkMoveStackTogether.Visible = false;
+            int redTotal = board.Pieces.Where(p => p.Side == "red" && p.IsAlive).Sum(p => p.Score) + 50;
+            int blueTotal = board.Pieces.Where(p => p.Side == "blue" && p.IsAlive).Sum(p => p.Score);
+            EndGame(true, $"Tư Lệnh đối phương đã bị tiêu diệt! (+50đ chiến thuật)\nTổng điểm: Đỏ {redTotal}đ - Xanh {blueTotal}đ");
             return;
         }
 
-        string sideStr = pieces[0].Side == "red" ? "🔴 Phe Đỏ" : "🔵 Phe Xanh";
-        lblStackTitle.Text = $"🎖️ NHÓM GHÉP ({pieces.Count} quân)";
-        lblStackInfo.Text = $"Ô ({pieces[0].X}, {pieces[0].Y}) - {sideStr}. Chọn quân:";
-
-        bool hasCarrier = pieces.Any(p => BoardControl.IsCarrier(p.Kind));
-        chkMoveStackTogether.Visible = hasCarrier;
-        chkMoveStackTogether.Checked = board.MoveStackTogether;
-
-        foreach (var p in pieces)
+        var redCmd = board.Pieces.FirstOrDefault(p => p.PieceId == "r_cmd");
+        if (redCmd != null && !redCmd.IsAlive)
         {
-            var btn = new Button
-            {
-                Size = new Size(205, 27),
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 8F, FontStyle.Bold),
-                Margin = new Padding(2, 2, 2, 2),
-                Cursor = Cursors.Hand,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Tag = p
-            };
-
-            string heroStar = p.IsHero ? " ★" : "";
-            string role = BoardControl.IsCarrier(p.Kind) ? "[Cõng]" : "[Quân]";
-            btn.Text = $" {GetPieceIcon(p.Kind)} {p.DisplayName} ({p.Score}đ){heroStar} {role}";
-
-            bool isSelected = (board.SelectedPiece == p);
-            if (isSelected)
-            {
-                btn.BackColor = Color.FromArgb(241, 196, 15);
-                btn.ForeColor = Color.Black;
-                btn.FlatAppearance.BorderColor = Color.FromArgb(218, 165, 32);
-                btn.FlatAppearance.BorderSize = 2;
-            }
-            else
-            {
-                btn.BackColor = p.Side == "red" ? Color.FromArgb(253, 237, 236) : Color.FromArgb(235, 245, 255);
-                btn.ForeColor = p.Side == "red" ? Color.FromArgb(192, 57, 43) : Color.FromArgb(41, 128, 185);
-                btn.FlatAppearance.BorderColor = Color.Silver;
-                btn.FlatAppearance.BorderSize = 1;
-            }
-
-            btn.Click += (s, e) =>
-            {
-                board.SelectSpecificPiece(p);
-                UpdateStackSelectDisplay(pieces);
-                UpdateCaptureModeDisplay();
-                lstChat.Items.Add($"[Ghép quân] Đã chọn {p.DisplayName} trong nhóm quân để điều khiển.");
-                lstChat.TopIndex = lstChat.Items.Count - 1;
-            };
-
-            flowStackPieces.Controls.Add(btn);
+            int redTotal = board.Pieces.Where(p => p.Side == "red" && p.IsAlive).Sum(p => p.Score);
+            int blueTotal = board.Pieces.Where(p => p.Side == "blue" && p.IsAlive).Sum(p => p.Score) + 50;
+            EndGame(false, $"Tư Lệnh phe bạn đã bị tiêu diệt! (+50đ chiến thuật cho Xanh)\nTổng điểm: Đỏ {redTotal}đ - Xanh {blueTotal}đ");
+            return;
         }
-    }
 
-    private static string GetPieceIcon(PieceKind kind)
-    {
-        return kind switch
+        if (isBotEnabled && board.CurrentTurn == "blue")
         {
-            PieceKind.Commander => "★",
-            PieceKind.Infantry => "🪖",
-            PieceKind.Tank => "🚜",
-            PieceKind.Militia => "👒",
-            PieceKind.Engineer => "🌉",
-            PieceKind.Artillery => "💥",
-            PieceKind.AntiAir => "🎯",
-            PieceKind.Rocket => "🚀",
-            PieceKind.AirForce => "🛩️",
-            PieceKind.Warship => "⚓",
-            PieceKind.Headquarter => "🏰",
-            _ => "♟"
-        };
+            Task.Delay(700).ContinueWith(_ =>
+            {
+                if (this.IsDisposed) return;
+                this.Invoke(() =>
+                {
+                    if (isBotEnabled && board.CurrentTurn == "blue")
+                    {
+                        SimulateOpponentMove();
+                    }
+                });
+            });
+        }
     }
 
     private void Board_OnPieceMoved(PieceView piece, int toX, int toY, PieceView? capturedPiece)
@@ -363,19 +206,19 @@ public partial class GamePlayForm : BaseForm
         string actionType;
         if (!piece.IsAlive && piece.Kind == PieceKind.AirForce)
         {
-            actionType = capturedPiece != null ? " 💥 Cảm tử ➔ " : " 💥 Bị phòng không bắn hạ tại ";
+            actionType = capturedPiece != null ? " Cảm tử -> " : " Bị phòng không bắn hạ tại ";
         }
         else if (piece.X == toX && piece.Y == toY)
         {
-            actionType = " ➔ ";
+            actionType = " -> ";
         }
         else
         {
             actionType = piece.Kind switch
             {
-                PieceKind.AirForce => " 💣 Ném bom ➔ ",
-                PieceKind.Warship => " 🎯 Xạ kích ➔ ",
-                _ => " 🎯 Bắn tại chỗ ➔ "
+                PieceKind.AirForce => " Ném bom -> ",
+                PieceKind.Warship => " Xạ kích -> ",
+                _ => " Bắn tại chỗ -> "
             };
         }
 
@@ -383,7 +226,7 @@ public partial class GamePlayForm : BaseForm
         string log;
         if (capturedPiece == null && stackedAtDest.Count > 1)
         {
-            log = $"{moveCount++}. {piece.DisplayName} ({piece.Side}) 👥 Ghép quân ➔ ({toX}, {toY}) [{stackedAtDest.Count} quân]";
+            log = $"{moveCount++}. {piece.DisplayName} ({piece.Side}) Ghép quân -> ({toX}, {toY}) [{stackedAtDest.Count} quân]";
         }
         else
         {
@@ -396,8 +239,6 @@ public partial class GamePlayForm : BaseForm
         currentTurnSeconds = 45;
         UpdateTurnDisplay();
         UpdateScores();
-        UpdateCaptureModeDisplay();
-        UpdateStackSelectDisplay(new List<PieceView>());
 
         // =========================================================================
         // KIỂM TRA ĐIỀU KIỆN KẾT THÚC VÁN CỜ - CHẾ ĐỘ TẤN CÔNG TỔNG LỰC (30 PHÚT):
@@ -470,7 +311,7 @@ public partial class GamePlayForm : BaseForm
         if (captureMoves.Count > 0 && Random.Shared.Next(100) < 75)
         {
             var bestCap = captureMoves.First();
-            board.MovePiece(bestCap.Piece.PieceId, bestCap.Dest.X, bestCap.Dest.Y);
+            board.MovePiece(bestCap.Piece.PieceId, bestCap.Dest.X, bestCap.Dest.Y, CaptureMode.StandStill);
         }
         else
         {
@@ -485,12 +326,12 @@ public partial class GamePlayForm : BaseForm
     {
         if (board.CurrentTurn == "red")
         {
-            lblTurn.Text = "LƯỢT ĐI:\n🔴 PHE ĐỎ (BẠN)";
+            lblTurn.Text = "LƯỢT ĐI:\nPHE ĐỎ (BẠN)";
             lblTurn.ForeColor = Color.FromArgb(192, 57, 43);
         }
         else
         {
-            lblTurn.Text = "LƯỢT ĐI:\n🔵 PHE XANH (ĐỐI THỦ)";
+            lblTurn.Text = "LƯỢT ĐI:\nPHE XANH (ĐỐI THỦ)";
             lblTurn.ForeColor = Color.FromArgb(41, 128, 185);
         }
     }
