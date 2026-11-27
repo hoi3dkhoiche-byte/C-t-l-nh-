@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SocketIOClient;
+using SocketIOClient.Common;
 
 namespace ClientAPP;
 
@@ -264,6 +265,11 @@ public sealed class RealtimeService
     public event Action? OnDisconnected;
     public event Action<SocketErrorEvent>? OnSocketError;
 
+    // Sự kiện Chat trong phòng / trong trận (từ nhánh match-chat)
+    public event Action<ChatMessageModel>? OnChatMessage;
+    public event Action<string>? OnChatRejected;
+    public event Action<string>? OnRoomNotice;
+
     // Sự kiện Phòng chờ (RoomForm)
     public event Action<RoomJoinedEvent>? OnRoomJoined;
     public event Action<PlayerJoinedEvent>? OnPlayerJoined;
@@ -323,9 +329,12 @@ public sealed class RealtimeService
                 ReconnectionAttempts = 15,
                 ReconnectionDelayMax = 4000,
                 ConnectionTimeout = TimeSpan.FromSeconds(8),
+                // Gửi JWT để server xác thực người dùng
                 Auth = string.IsNullOrWhiteSpace(token)
                     ? null
-                    : new Dictionary<string, string> { ["token"] = token }
+                    : new Dictionary<string, string> { ["token"] = token },
+                // Nối thẳng WebSocket để tương thích ổn định với Flask-SocketIO (simple-websocket)
+                Transport = TransportProtocol.WebSocket
             };
 
             _socket = new SocketIO(new Uri(targetUrl), options);
@@ -353,7 +362,7 @@ public sealed class RealtimeService
         {
             OnConnected?.Invoke();
 
-            // Nếu đang ở giữa phòng / giữa ván đấu mà mất mạng rồi tự kết nối lại -> gửi lại join_room để Server resync bàn cờ
+            // Tự động vào lại phòng để Server resync bàn cờ nếu mất mạng tạm thời giữa ván
             string? roomToRejoin = ActiveRoomCode;
             if (!string.IsNullOrWhiteSpace(roomToRejoin))
             {
@@ -370,10 +379,44 @@ public sealed class RealtimeService
             OnDisconnected?.Invoke();
         };
 
+        // --- CHAT EVENTS ---
+        socket.On("chat_message", ctx =>
+        {
+            var msg = TryGetPayload<ChatMessageModel>(ctx);
+            if (msg != null)
+            {
+                GameApiService.Instance.CacheUser(msg.UserId, msg.Username);
+                OnChatMessage?.Invoke(msg);
+            }
+            return Task.CompletedTask;
+        });
+
+        socket.On("chat_rejected", ctx =>
+        {
+            string reason = ReadString(ctx, "reason");
+            OnChatRejected?.Invoke(reason switch
+            {
+                "NOT_IN_ROOM" => "Bạn chưa vào phòng nên chưa chat được",
+                "EMPTY" => "Tin nhắn trống",
+                "TOO_LONG" => "Tin nhắn quá dài (tối đa 200 ký tự)",
+                "TOO_FAST" => "Bạn gửi nhanh quá, đợi 1 giây",
+                _ => "Không gửi được tin nhắn"
+            });
+            return Task.CompletedTask;
+        });
+
+        // --- ROOM & GAMEPLAY EVENTS ---
         socket.On("error", ctx =>
         {
             var err = TryGetPayload<SocketErrorEvent>(ctx);
-            if (err != null) OnSocketError?.Invoke(err);
+            if (err != null)
+            {
+                OnSocketError?.Invoke(err);
+                if (!string.IsNullOrWhiteSpace(err.Message))
+                {
+                    OnRoomNotice?.Invoke("Lỗi: " + err.Message);
+                }
+            }
             return Task.CompletedTask;
         });
 
@@ -384,6 +427,8 @@ public sealed class RealtimeService
             {
                 ActiveRoomCode = ev.RoomCode;
                 OnRoomJoined?.Invoke(ev);
+                string colorVi = ev.YourColor == "red" ? "Đỏ" : "Xanh";
+                OnRoomNotice?.Invoke($"Đã kết nối phòng {ev.RoomCode}, bạn cầm phe {colorVi}");
             }
             return Task.CompletedTask;
         });
@@ -391,7 +436,11 @@ public sealed class RealtimeService
         socket.On("player_joined", ctx =>
         {
             var ev = TryGetPayload<PlayerJoinedEvent>(ctx);
-            if (ev != null) OnPlayerJoined?.Invoke(ev);
+            if (ev != null)
+            {
+                OnPlayerJoined?.Invoke(ev);
+                OnRoomNotice?.Invoke("Đối thủ đã vào phòng");
+            }
             return Task.CompletedTask;
         });
 
@@ -402,6 +451,7 @@ public sealed class RealtimeService
             {
                 if (ev.RoomClosed) ActiveRoomCode = null;
                 OnPlayerLeft?.Invoke(ev);
+                OnRoomNotice?.Invoke("Đối thủ đã rời phòng");
             }
             return Task.CompletedTask;
         });
@@ -409,7 +459,11 @@ public sealed class RealtimeService
         socket.On("join_pending", ctx =>
         {
             var ev = TryGetPayload<JoinPendingEvent>(ctx);
-            if (ev != null) OnJoinPending?.Invoke(ev);
+            if (ev != null)
+            {
+                OnJoinPending?.Invoke(ev);
+                OnRoomNotice?.Invoke("Đang chờ chủ phòng duyệt...");
+            }
             return Task.CompletedTask;
         });
 
@@ -553,6 +607,21 @@ public sealed class RealtimeService
         });
     }
 
+    private static string ReadString(IEventContext ctx, string name)
+    {
+        try
+        {
+            var elem = TryGetJsonElement(ctx);
+            if (elem.HasValue && elem.Value.ValueKind == JsonValueKind.Object &&
+                elem.Value.TryGetProperty(name, out var val))
+            {
+                return val.ToString();
+            }
+        }
+        catch { }
+        return "";
+    }
+
     private static JsonElement? TryGetJsonElement(IEventContext ctx)
     {
         try
@@ -630,7 +699,6 @@ public sealed class RealtimeService
     {
         if (_socket != null && _socket.Connected)
         {
-            // Khớp chính xác chuỗi "stand" / "occupy" trong cotulenh_server/game_engine.py
             string modeStr = captureMode == CaptureMode.StandStill ? "stand" : "occupy";
             await _socket.EmitAsync("make_move", [new
             {
@@ -643,6 +711,14 @@ public sealed class RealtimeService
                 move_stack = moveStack
             }]);
         }
+    }
+
+    public async Task<bool> SendChatAsync(string message)
+    {
+        if (_socket == null || !_socket.Connected) return false;
+
+        await _socket.EmitAsync("chat", [new { message }]);
+        return true;
     }
 
     public async Task LeaveRoomAsync(string? roomCode = null)

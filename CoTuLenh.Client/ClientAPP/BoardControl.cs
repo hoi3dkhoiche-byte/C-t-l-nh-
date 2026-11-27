@@ -65,6 +65,19 @@ public class BoardControl : UserControl
     private int marginY = 35;
     private Image? terrainImage = null;
 
+    // Hiệu ứng nổ 2D & nhấp nháy vành đai lửa trong 2 giây
+    private readonly System.Windows.Forms.Timer animationTimer = new() { Interval = 40 };
+    private bool isAnimatingExplosion = false;
+    private DateTime animationStartTime;
+    private const int ExplosionDurationMs = 2000;
+    private Point? explosionGridPos = null;
+    private List<PieceView> blinkingFireRingPieces = new();
+    private Action? pendingPostExplosionAction = null;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
+    public bool IsAnimating => isAnimatingExplosion;
+
     public BoardControl()
     {
         this.DoubleBuffered = true;
@@ -72,6 +85,28 @@ public class BoardControl : UserControl
         this.Size = new Size(620, 700);
         terrainImage = LoadTerrainMap();
         InitializeStandardPieces();
+
+        animationTimer.Tick += AnimationTimer_Tick;
+    }
+
+    private void AnimationTimer_Tick(object? sender, EventArgs e)
+    {
+        double elapsedMs = (DateTime.Now - animationStartTime).TotalMilliseconds;
+        if (elapsedMs >= ExplosionDurationMs)
+        {
+            animationTimer.Stop();
+            isAnimatingExplosion = false;
+            explosionGridPos = null;
+            blinkingFireRingPieces.Clear();
+
+            var callback = pendingPostExplosionAction;
+            pendingPostExplosionAction = null;
+            Invalidate();
+            callback?.Invoke();
+            return;
+        }
+
+        Invalidate();
     }
 
     private static Image? LoadTerrainMap()
@@ -129,9 +164,11 @@ public class BoardControl : UserControl
         // Y = 0: Tư Lệnh
         Pieces.Add(new PieceView { PieceId = "r_cmd", Kind = PieceKind.Commander, Side = "red", X = 6, Y = 0, DisplayName = "Tư Lệnh", Notation = "★", Score = 100 });
 
-        // Y = 1: Hải quân, Không quân
+        // Y = 1: Hải quân, Không quân, Sở chỉ huy
         Pieces.Add(new PieceView { PieceId = "r_ship1", Kind = PieceKind.Warship, Side = "red", X = 1, Y = 1, DisplayName = "Tàu Chiến", Notation = "H", Score = 80 });
         Pieces.Add(new PieceView { PieceId = "r_air1", Kind = PieceKind.AirForce, Side = "red", X = 4, Y = 1, DisplayName = "Không Quân", Notation = "K", Score = 40, AirportLocation = new Point(4, 1) });
+        Pieces.Add(new PieceView { PieceId = "r_hq1", Kind = PieceKind.Headquarter, Side = "red", X = 5, Y = 1, DisplayName = "Sở Chỉ Huy", Notation = "S", Score = 10 });
+        Pieces.Add(new PieceView { PieceId = "r_hq2", Kind = PieceKind.Headquarter, Side = "red", X = 7, Y = 1, DisplayName = "Sở Chỉ Huy", Notation = "S", Score = 10 });
         Pieces.Add(new PieceView { PieceId = "r_air2", Kind = PieceKind.AirForce, Side = "red", X = 8, Y = 1, DisplayName = "Không Quân", Notation = "K", Score = 40, AirportLocation = new Point(8, 1) });
 
         // Y = 2: Cao xạ, Tên lửa
@@ -159,9 +196,11 @@ public class BoardControl : UserControl
         // Y = 11: Tư Lệnh
         Pieces.Add(new PieceView { PieceId = "b_cmd", Kind = PieceKind.Commander, Side = "blue", X = 6, Y = 11, DisplayName = "Tư Lệnh", Notation = "★", Score = 100 });
 
-        // Y = 10: Hải quân, Không quân
+        // Y = 10: Hải quân, Không quân, Sở chỉ huy
         Pieces.Add(new PieceView { PieceId = "b_ship1", Kind = PieceKind.Warship, Side = "blue", X = 1, Y = 10, DisplayName = "Tàu Chiến", Notation = "H", Score = 80 });
         Pieces.Add(new PieceView { PieceId = "b_air1", Kind = PieceKind.AirForce, Side = "blue", X = 4, Y = 10, DisplayName = "Không Quân", Notation = "K", Score = 40, AirportLocation = new Point(4, 10) });
+        Pieces.Add(new PieceView { PieceId = "b_hq1", Kind = PieceKind.Headquarter, Side = "blue", X = 5, Y = 10, DisplayName = "Sở Chỉ Huy", Notation = "S", Score = 10 });
+        Pieces.Add(new PieceView { PieceId = "b_hq2", Kind = PieceKind.Headquarter, Side = "blue", X = 7, Y = 10, DisplayName = "Sở Chỉ Huy", Notation = "S", Score = 10 });
         Pieces.Add(new PieceView { PieceId = "b_air2", Kind = PieceKind.AirForce, Side = "blue", X = 8, Y = 10, DisplayName = "Không Quân", Notation = "K", Score = 40, AirportLocation = new Point(8, 10) });
 
         // Y = 9: Cao xạ, Tên lửa
@@ -220,9 +259,18 @@ public class BoardControl : UserControl
 
     public static bool CanCarry(PieceKind carrier, PieceKind passenger)
     {
-        if (carrier == PieceKind.Tank || carrier == PieceKind.AirForce)
+        if (carrier == PieceKind.Headquarter)
+        {
+            return passenger == PieceKind.Commander;
+        }
+        if (carrier == PieceKind.Tank)
         {
             return passenger == PieceKind.Commander || passenger == PieceKind.Infantry || passenger == PieceKind.Militia;
+        }
+        if (carrier == PieceKind.AirForce)
+        {
+            return passenger == PieceKind.Commander || passenger == PieceKind.Infantry || passenger == PieceKind.Militia ||
+                   passenger == PieceKind.Tank;
         }
         if (carrier == PieceKind.Warship)
         {
@@ -236,17 +284,27 @@ public class BoardControl : UserControl
     {
         if (targetOccupants == null || targetOccupants.Count == 0) return false;
         if (targetOccupants.Any(p => p.Side != movingPiece.Side)) return false;
-        if (targetOccupants.Count >= 3) return false; // Tối đa 3 quân trong 1 cụm ghép
 
-        var carrier = targetOccupants.FirstOrDefault(p => IsCarrier(p.Kind));
-        if (carrier != null && CanCarry(carrier.Kind, movingPiece.Kind))
+        // Sở chỉ huy chỉ cho Tư lệnh ẩn nấp (tối đa 2 quân)
+        if (targetOccupants.Any(p => p.Kind == PieceKind.Headquarter))
         {
-            return true;
+            return targetOccupants.Count == 1 && movingPiece.Kind == PieceKind.Commander;
         }
 
-        if (IsCarrier(movingPiece.Kind) && targetOccupants.All(p => CanCarry(movingPiece.Kind, p.Kind)))
+        // Xe tăng chỉ chở tối đa 1 quân (Tổng 2 quân)
+        var carrier = targetOccupants.FirstOrDefault(p => IsCarrier(p.Kind));
+        if (carrier != null)
         {
-            return true;
+            int maxTotal = carrier.Kind == PieceKind.Tank ? 2 : 3;
+            if (targetOccupants.Count >= maxTotal) return false;
+            return CanCarry(carrier.Kind, movingPiece.Kind);
+        }
+
+        if (IsCarrier(movingPiece.Kind))
+        {
+            int maxTotal = movingPiece.Kind == PieceKind.Tank ? 2 : 3;
+            if (targetOccupants.Count >= maxTotal) return false;
+            return targetOccupants.All(p => CanCarry(movingPiece.Kind, p.Kind));
         }
 
         return false;
@@ -254,7 +312,8 @@ public class BoardControl : UserControl
 
     public static bool HasMultipleCaptureModes(PieceKind kind)
     {
-        return kind == PieceKind.AirForce || kind == PieceKind.Artillery || kind == PieceKind.Warship || kind == PieceKind.Tank;
+        // Không quân tự động chọn chế độ ăn theo tình huống (Thế chỗ / Cảm tử / Ném bom), không bật nút đổi thủ công
+        return kind == PieceKind.Artillery || kind == PieceKind.Warship || kind == PieceKind.Tank;
     }
 
     public static bool HasFireRing(PieceKind kind)
@@ -283,7 +342,7 @@ public class BoardControl : UserControl
 
     public void SelectSpecificPiece(PieceView piece)
     {
-        if (!piece.IsAlive) return;
+        if (isAnimatingExplosion || !piece.IsAlive) return;
         if (IsOnlineMode && (CurrentTurn != PlayerSide || piece.Side != PlayerSide)) return;
         SelectedPiece = piece;
         ValidMoves = GetValidMoves(piece);
@@ -308,29 +367,43 @@ public class BoardControl : UserControl
 
         switch (piece.Kind)
         {
+            case PieceKind.Headquarter: // Sở Chỉ Huy
+                // Nguyên tắc bất động; nếu là quân cuối cùng bảo vệ Tư lệnh (được phong Anh hùng) -> cơ động như Bộ binh anh hùng
+                if (piece.IsHero)
+                {
+                    AddStepMoves(piece, moves, 2, allowDiagonal: true, canEnterSea: false, allowDeepRiver: true);
+                }
+                break;
+
             case PieceKind.Commander: // Tư Lệnh
-                // Đi theo trục dọc ngang không hạn chế, miễn không vướng quân chắn
-                // Nhưng khi ăn quân đối phương: chỉ được ăn trong phạm vi 1 nấc
-                for (int i = 0; i < 4; i++)
+                // Đi theo trục dọc ngang không hạn chế (nếu là anh hùng đi cả chéo 45 độ), miễn không vướng quân chắn
+                // Ăn quân đối phương: phạm vi 1 nấc (+1 nếu anh hùng), hoặc ăn Tư lệnh đối phương nếu mặt đối mặt không vật cản
+                int cmdDirs = piece.IsHero ? 8 : 4;
+                for (int i = 0; i < cmdDirs; i++)
                 {
                     for (int step = 1; step < Math.Max(COLS, ROWS); step++)
                     {
-                        int tx = piece.X + DirX4[i] * step;
-                        int ty = piece.Y + DirY4[i] * step;
+                        int tx = piece.X + DirX8[i] * step;
+                        int ty = piece.Y + DirY8[i] * step;
                         if (!InBounds(tx, ty)) break;
-                        if (IsSea(tx)) break; // Tư lệnh không nhảy xuống biển
+                        if (IsSea(tx)) break; // Tư lệnh không tự đi xuống biển (chỉ lên tàu chiến)
 
-                            var occs = GetPiecesAt(tx, ty);
+                        var occs = GetPiecesAt(tx, ty);
                         if (occs.Count == 0)
                         {
                             moves.Add(new Point(tx, ty));
                         }
                         else
                         {
-                                var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                            var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
                             if (enemy != null)
                             {
-                                if (step <= 1 + bonus) moves.Add(new Point(tx, ty));
+                                bool isExposedEnemyCmd = (i < 4) && enemy.Kind == PieceKind.Commander &&
+                                    !occs.Any(p => p.Side == enemy.Side && IsCarrier(p.Kind));
+                                if (step <= 1 + bonus || isExposedEnemyCmd)
+                                {
+                                    moves.Add(new Point(tx, ty));
+                                }
                             }
                             else if (CanStack(piece, occs))
                             {
@@ -343,72 +416,82 @@ public class BoardControl : UserControl
                 break;
 
             case PieceKind.Infantry: // Bộ Binh
-                // Đi và ăn thẳng dọc ngang từng đoạn 1 (bán kính 1)
-                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: piece.IsHero, canEnterSea: false);
-                // Bắn quân trên biển: Đứng tại chỗ bờ biển (X=2) ăn quân trên biển (X=1) cách 1 đoạn
+                // Đi và ăn thẳng dọc ngang từng đoạn 1 (được vượt sông ở mọi đoạn)
+                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: piece.IsHero, canEnterSea: false, allowDeepRiver: true);
                 if (piece.X == 2)
                 {
-                        var seaEnemies = GetPiecesAt(1, piece.Y).Where(p => p.Side != piece.Side).ToList();
-                    if (seaEnemies.Count > 0)
-                        moves.Add(new Point(1, piece.Y));
+                    var seaEnemies = GetPiecesAt(1, piece.Y).Where(p => p.Side != piece.Side).ToList();
+                    if (seaEnemies.Count > 0) moves.Add(new Point(1, piece.Y));
                 }
                 break;
 
             case PieceKind.Militia: // Dân Quân Tóc Dài
-                // Đi tiến, lùi, ngang VÀ đi/ăn chéo 45 độ từng đoạn 1 (tất cả 8 hướng)
-                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: true, canEnterSea: false);
+                // Đi tiến, lùi, ngang VÀ đi/ăn chéo 45 độ từng đoạn 1 (được vượt sông ở mọi đoạn)
+                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: true, canEnterSea: false, allowDeepRiver: true);
                 if (piece.X == 2)
                 {
-                        var seaEnemies = GetPiecesAt(1, piece.Y).Where(p => p.Side != piece.Side).ToList();
-                    if (seaEnemies.Count > 0)
-                        moves.Add(new Point(1, piece.Y));
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        int ty = piece.Y + dy;
+                        if (!InBounds(1, ty)) continue;
+                        var seaEnemies = GetPiecesAt(1, ty).Where(p => p.Side != piece.Side).ToList();
+                        if (seaEnemies.Count > 0) moves.Add(new Point(1, ty));
+                    }
                 }
                 break;
 
             case PieceKind.Engineer: // Công Binh
-                // Đi tiến, lùi, ngang từng đoạn 1; có thể bắc cầu vượt sông ở bất kỳ vị trí nào
-                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: piece.IsHero, canEnterSea: false, isEngineer: true);
+                // Đi tiến, lùi, ngang từng đoạn 1; vượt sông mọi vị trí và bắc cầu cho hỏa khí nặng
+                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: piece.IsHero, canEnterSea: false, allowDeepRiver: true);
+                if (piece.X == 2)
+                {
+                    var seaEnemies = GetPiecesAt(1, piece.Y).Where(p => p.Side != piece.Side).ToList();
+                    if (seaEnemies.Count > 0) moves.Add(new Point(1, piece.Y));
+                }
                 break;
 
             case PieceKind.AntiAir: // Cao Xạ
-                // Đi và ăn thẳng dọc ngang từng đoạn 1
-                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: piece.IsHero, canEnterSea: false);
+                // Hỏa khí nặng: qua sông chỉ ở ngầm cạn, có công binh bắc cầu, hoặc khi ăn quân bên kia sông
+                AddStepMoves(piece, moves, 1 + bonus, allowDiagonal: piece.IsHero, canEnterSea: false, allowDeepRiver: false);
+                if (piece.X == 2)
+                {
+                    var seaEnemies = GetPiecesAt(1, piece.Y).Where(p => p.Side != piece.Side).ToList();
+                    if (seaEnemies.Count > 0) moves.Add(new Point(1, piece.Y));
+                }
                 break;
 
             case PieceKind.Tank: // Xe Tăng
-                // Đi và ăn thẳng dọc ngang từ 1 đến 2 đoạn (không vượt quân cản)
+                // Đi và ăn thẳng dọc ngang từ 1 đến 2 đoạn (vượt sông tự do); nếu anh hùng đi cả chéo 45 độ
                 int maxTankRange = 2 + bonus;
-                for (int i = 0; i < 4; i++)
+                int tankDirs = piece.IsHero ? 8 : 4;
+                for (int i = 0; i < tankDirs; i++)
                 {
                     for (int step = 1; step <= maxTankRange; step++)
                     {
-                        int tx = piece.X + DirX4[i] * step;
-                        int ty = piece.Y + DirY4[i] * step;
+                        int tx = piece.X + DirX8[i] * step;
+                        int ty = piece.Y + DirY8[i] * step;
                         if (!InBounds(tx, ty)) break;
 
                         // Nếu là mục tiêu trên biển: Xe tăng được đứng tại chỗ bắn ăn mục tiêu trong tầm
                         if (IsSea(tx))
                         {
-                                var target = GetPiecesAt(tx, ty).FirstOrDefault(p => p.Side != piece.Side);
+                            var target = GetPiecesAt(tx, ty).FirstOrDefault(p => p.Side != piece.Side);
                             if (target != null)
                                 moves.Add(new Point(tx, ty));
                             break; // Không thể lái xe xuống biển
                         }
 
-                        // Vượt sông: Chỉ được qua ở ngầm cạn (X=5 hoặc X=7)
-                        if (IsCrossingRiver(piece.Y, ty) && !IsShallowFord(piece.X)) break;
-
-                            var occs = GetPiecesAt(tx, ty);
+                        var occs = GetPiecesAt(tx, ty);
                         if (occs.Count == 0)
                         {
                             if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
                         }
                         else
                         {
-                                var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                            var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
                             if (enemy != null)
                             {
-                                if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                                moves.Add(new Point(tx, ty));
                             }
                             else if (CanStack(piece, occs))
                             {
@@ -436,36 +519,39 @@ public class BoardControl : UserControl
                         var occs = GetPiecesAt(tx, ty);
                         if (screenCount == 0)
                         {
-                                if (occs.Count == 0)
+                            if (occs.Count == 0)
+                            {
+                                if (!IsSea(tx) && !IsHeadquarter(tx, ty) &&
+                                    CanHeavyCrossRiver(piece, tx, ty, isCaptureMove: false))
                                 {
-                                    if (!IsSea(tx) && !IsHeadquarter(tx, ty))
-                                        moves.Add(new Point(tx, ty));
+                                    moves.Add(new Point(tx, ty));
                                 }
-                                else
+                            }
+                            else
+                            {
+                                var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                                if (enemy != null)
                                 {
-                                    var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
-                                    if (enemy != null && !IsHeadquarter(tx, ty))
-                                    {
-                                        moves.Add(new Point(tx, ty)); // Bắn trực tiếp
-                                    }
-                                    else if (CanStack(piece, occs))
-                                    {
-                                        moves.Add(new Point(tx, ty));
-                                    }
-                                    screenCount = 1; // Làm khối chắn
+                                    moves.Add(new Point(tx, ty)); // Bắn trực tiếp (kể cả qua sông/ra biển/phá sở chỉ huy)
                                 }
+                                else if (CanStack(piece, occs) && CanHeavyCrossRiver(piece, tx, ty, isCaptureMove: false))
+                                {
+                                    moves.Add(new Point(tx, ty));
+                                }
+                                screenCount = 1; // Làm khối chắn
+                            }
                         }
                         else if (screenCount == 1)
                         {
-                                if (occs.Count > 0)
+                            if (occs.Count > 0)
+                            {
+                                var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                                if (enemy != null)
                                 {
-                                        var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
-                                    if (enemy != null && !IsHeadquarter(tx, ty))
-                                    {
-                                        moves.Add(new Point(tx, ty)); // Bắn vượt khối chắn
-                                    }
-                                    break;
+                                    moves.Add(new Point(tx, ty)); // Bắn vượt khối chắn
                                 }
+                                break;
+                            }
                         }
                     }
                 }
@@ -481,27 +567,30 @@ public class BoardControl : UserControl
                     {
                         int tx = piece.X + DirX8[dir] * step;
                         int ty = piece.Y + DirY8[dir] * step;
-                        if (!InBounds(tx, ty)) continue;
+                        if (!InBounds(tx, ty)) break;
 
-                            var occs = GetPiecesAt(tx, ty);
+                        var occs = GetPiecesAt(tx, ty);
                         if (occs.Count == 0)
                         {
-                            if (!IsSea(tx) && !IsHeadquarter(tx, ty))
+                            if (!IsSea(tx) && !IsHeadquarter(tx, ty) &&
+                                CanHeavyCrossRiver(piece, tx, ty, isCaptureMove: false))
+                            {
                                 moves.Add(new Point(tx, ty));
+                            }
                         }
                         else
-                                {
-                                    var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
-                                    if (enemy != null)
-                                    {
-                                        if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
-                                    }
-                                    else if (CanStack(piece, occs))
-                                    {
-                                        moves.Add(new Point(tx, ty));
-                                    }
-                                    break;
-                                }
+                        {
+                            var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                            if (enemy != null)
+                            {
+                                moves.Add(new Point(tx, ty));
+                            }
+                            else if (CanStack(piece, occs) && CanHeavyCrossRiver(piece, tx, ty, isCaptureMove: false))
+                            {
+                                moves.Add(new Point(tx, ty));
+                            }
+                            break;
+                        }
                     }
                 }
                 break;
@@ -524,10 +613,10 @@ public class BoardControl : UserControl
                         }
                         else
                         {
-                                var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                            var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
                             if (enemy != null)
                             {
-                                if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                                moves.Add(new Point(tx, ty));
                             }
                             else if (CanStack(piece, occs))
                             {
@@ -538,52 +627,59 @@ public class BoardControl : UserControl
                 }
                 break;
 
-            case PieceKind.Warship: // Tàu Chiến
-                // Tàu chiến hoạt động ở vùng biển (X <= 2) và đoạn sông sâu
-                // Tên lửa hải đối hải: đi và ăn thẳng/chéo 1-4 đoạn trên biển
+            case PieceKind.Warship: // Tàu Chiến (Hải Quân)
+                // Di chuyển: Ngang, dọc và chéo 45 độ (1-4 đoạn) trên các ô quy định (biển X <= 2 hoặc sông sâu), KHÔNG bị chặn bởi quân khác.
+                // Ăn thế chỗ: tầm 4 ô ngang/dọc/chéo 45 độ khi không vướng đất liền (mục tiêu là Hải quân địch hoặc mục tiêu bất kỳ dọc bờ biển/bờ sông).
+                // Xạ kích: Chéo 45 độ 4 ô với Hải quân địch (không vướng đất liền); Ngang/Dọc/Chéo 45 độ 3 ô với các quân khác ngoài Hải quân trên đất liền.
+                int maxShipRange = 4 + bonus;
                 for (int dir = 0; dir < 8; dir++)
                 {
-                    for (int step = 1; step <= 4; step++)
+                    bool hitLand = false;
+
+                    for (int step = 1; step <= maxShipRange; step++)
                     {
                         int tx = piece.X + DirX8[dir] * step;
                         int ty = piece.Y + DirY8[dir] * step;
                         if (!InBounds(tx, ty)) break;
 
-                        bool isNavigable = (tx <= 2) || (IsDeepRiver(tx, ty));
+                        bool isNavigable = (tx <= 2) || IsDeepRiver(tx, ty);
+                        if (!isNavigable) hitLand = true;
+
                         var occs = GetPiecesAt(tx, ty);
 
-                        if (isNavigable)
+                        if (!hitLand)
                         {
-                                if (occs.Count == 0)
+                            if (occs.Count == 0)
+                            {
+                                moves.Add(new Point(tx, ty));
+                            }
+                            else
+                            {
+                                var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                                if (enemy != null)
                                 {
                                     moves.Add(new Point(tx, ty));
                                 }
-                                else
+                                else if (CanStack(piece, occs))
                                 {
-                                        var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
-                                    if (enemy != null)
-                                    {
-                                        moves.Add(new Point(tx, ty));
-                                    }
-                                    else if (CanStack(piece, occs))
-                                    {
-                                        moves.Add(new Point(tx, ty));
-                                    }
-                                    break;
+                                    moves.Add(new Point(tx, ty));
                                 }
+                                // Không bị chặn bởi quân khác -> tiếp tục xét các ô tiếp theo trên hướng này
+                            }
                         }
                         else
                         {
-                            // Pháo hạm bắn mục tiêu trên đất liền (1-3 đoạn) đứng tại chỗ
-                                if (step <= 3 && occs.Count > 0)
+                            // Đã vướng đất liền: chỉ được Xạ kích (Ngang/Dọc/Chéo 45 độ tầm 3 ô) với các quân ngoài Hải quân
+                            if (step > 3) break;
+
+                            if (occs.Count > 0)
+                            {
+                                var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                                if (enemy != null && enemy.Kind != PieceKind.Warship)
                                 {
-                                    var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
-                                    if (enemy != null && !IsHeadquarter(tx, ty))
-                                    {
-                                        moves.Add(new Point(tx, ty));
-                                    }
+                                    moves.Add(new Point(tx, ty));
                                 }
-                            break;
+                            }
                         }
                     }
                 }
@@ -593,7 +689,21 @@ public class BoardControl : UserControl
         return moves.Distinct().ToList();
     }
 
-    private void AddStepMoves(PieceView piece, List<Point> moves, int maxSteps, bool allowDiagonal, bool canEnterSea, bool isEngineer = false)
+    private bool HasEngineerBridge(string side, int x)
+    {
+        return Pieces.Any(p => p.IsAlive && p.Side == side && p.Kind == PieceKind.Engineer &&
+            p.X == x && (p.Y == 5 || p.Y == 6 || p.Y == 4 || p.Y == 7));
+    }
+
+    private bool CanHeavyCrossRiver(PieceView piece, int toX, int toY, bool isCaptureMove)
+    {
+        if (!IsCrossingRiver(piece.Y, toY)) return true;
+        if (IsShallowFord(piece.X) || IsShallowFord(toX)) return true;
+        if (isCaptureMove) return true; // Luật: Khi ăn quân đối phương bên kia sông được phép qua thế chỗ
+        return HasEngineerBridge(piece.Side, piece.X) || HasEngineerBridge(piece.Side, toX);
+    }
+
+    private void AddStepMoves(PieceView piece, List<Point> moves, int maxSteps, bool allowDiagonal, bool canEnterSea, bool allowDeepRiver = true)
     {
         int[] dx = allowDiagonal ? new[] { 0, 0, -1, 1, -1, 1, -1, 1 } : new[] { 0, 0, -1, 1 };
         int[] dy = allowDiagonal ? new[] { 1, -1, 0, 0, 1, 1, -1, -1 } : new[] { 1, -1, 0, 0 };
@@ -607,29 +717,30 @@ public class BoardControl : UserControl
                 if (!InBounds(tx, ty)) break;
 
                 if (!canEnterSea && IsSea(tx)) break; // Không vào vùng biển
-                if (IsHeadquarter(tx, ty)) break; // Chỉ tư lệnh mới vào được sở chỉ huy
 
-                // Kiểm tra vượt sông (giữa hàng 5 và 6):
-                if (IsCrossingRiver(piece.Y, ty) && !isEngineer && !IsShallowFord(piece.X))
-                {
-                    break; // Không có ngầm cạn hoặc công binh thì không vượt được sông
-                }
-
-                    var occs = GetPiecesAt(tx, ty);
+                var occs = GetPiecesAt(tx, ty);
                 if (occs.Count == 0)
                 {
-                    moves.Add(new Point(tx, ty));
+                    if (!allowDeepRiver && !CanHeavyCrossRiver(piece, tx, ty, isCaptureMove: false))
+                        break;
+                    if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
                 }
                 else
                 {
-                        var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
+                    var enemy = occs.FirstOrDefault(p => p.Side != piece.Side);
                     if (enemy != null)
                     {
-                        moves.Add(new Point(tx, ty));
+                        if (allowDeepRiver || CanHeavyCrossRiver(piece, tx, ty, isCaptureMove: true))
+                        {
+                            moves.Add(new Point(tx, ty));
+                        }
                     }
                     else if (CanStack(piece, occs))
                     {
-                        moves.Add(new Point(tx, ty));
+                        if (allowDeepRiver || CanHeavyCrossRiver(piece, tx, ty, isCaptureMove: false))
+                        {
+                            moves.Add(new Point(tx, ty));
+                        }
                     }
                     break;
                 }
@@ -643,11 +754,49 @@ public class BoardControl : UserControl
 
     public PieceView? GetPieceAt(int x, int y) => Pieces.FirstOrDefault(p => p.X == x && p.Y == y && p.IsAlive);
 
+    private List<PieceView> GetEnemyAntiAirDefendersAt(string friendlySide, int x, int y)
+    {
+        return Pieces.Where(p => p.Side != friendlySide && p.IsAlive &&
+            (p.Kind == PieceKind.AntiAir || p.Kind == PieceKind.Rocket || p.Kind == PieceKind.Warship) &&
+            IsWithinFireRing(p, x, y)).ToList();
+    }
+
+    private static bool IsWithinFireRing(PieceView defender, int x, int y)
+    {
+        int r = defender.Kind == PieceKind.Rocket ? 2 : 1;
+        return Math.Abs(defender.X - x) <= r && Math.Abs(defender.Y - y) <= r;
+    }
+
+    /// <summary>
+    /// Tìm ô rìa vành đai lửa đầu tiên mà Không quân bay qua trên đường từ (fromX, fromY) tới (toX, toY).
+    /// </summary>
+    private (Point? EdgeCell, List<PieceView> Defenders) FindFirstFireRingIntersectionOnFlight(PieceView airPiece, int fromX, int fromY, int toX, int toY)
+    {
+        int dx = Math.Sign(toX - fromX);
+        int dy = Math.Sign(toY - fromY);
+        int steps = Math.Max(Math.Abs(toX - fromX), Math.Abs(toY - fromY));
+
+        for (int step = 1; step <= steps; step++)
+        {
+            int cx = fromX + dx * step;
+            int cy = fromY + dy * step;
+            var defenders = GetEnemyAntiAirDefendersAt(airPiece.Side, cx, cy);
+            if (defenders.Count > 0)
+            {
+                return (new Point(cx, cy), defenders);
+            }
+        }
+
+        return (null, new List<PieceView>());
+    }
+
     /// <summary>
     /// Thực hiện di chuyển hoặc ăn quân kèm theo xử lý luật và xác nhận Client-Server
     /// </summary>
     public void MovePiece(string pieceId, int toX, int toY)
     {
+        if (isAnimatingExplosion) return;
+
         var piece = Pieces.FirstOrDefault(p => p.PieceId == pieceId && p.IsAlive);
         if (piece == null) return;
 
@@ -666,69 +815,199 @@ public class BoardControl : UserControl
         var targetEnemies = GetPiecesAt(toX, toY).Where(p => p.Side != piece.Side).ToList();
         PieceView? primaryTarget = targetEnemies.FirstOrDefault();
 
+        // =========================================================================
+        // XỬ LÝ RIÊNG CHO KHÔNG QUÂN (AIRFORCE)
+        // =========================================================================
+        if (piece.Kind == PieceKind.AirForce)
+        {
+            var (edgeCell, edgeDefenders) = FindFirstFireRingIntersectionOnFlight(piece, oldX, oldY, toX, toY);
+
+            // Trường hợp 1: Bay qua vành đai lửa TRƯỚC khi tới ô đích -> Phát nổ ngay ô rìa vành đai lửa
+            if (edgeCell.HasValue && (edgeCell.Value.X != toX || edgeCell.Value.Y != toY) && !piece.IsHero)
+            {
+                piece.IsAlive = false;
+                piece.X = edgeCell.Value.X;
+                piece.Y = edgeCell.Value.Y;
+
+                StartExplosionAnimation(edgeCell.Value, edgeDefenders, () =>
+                {
+                    FinishTurnAfterMove(piece, edgeCell.Value.X, edgeCell.Value.Y, null);
+                });
+                return;
+            }
+
+            // Trường hợp 2: Tới được ô đích (toX, toY)
+            if (targetEnemies.Count > 0 && primaryTarget != null)
+            {
+                if (primaryTarget.Kind == PieceKind.AirForce)
+                {
+                    // 2a. Địch là Không quân -> Ăn thế chỗ
+                    KillTargetEnemies(piece, targetEnemies);
+                    MovePieceWithStack(piece, oldX, oldY, toX, toY);
+                    FinishTurnAfterMove(piece, toX, toY, primaryTarget);
+                    return;
+                }
+
+                var defendersAtTarget = GetEnemyAntiAirDefendersAt(piece.Side, toX, toY);
+                if (defendersAtTarget.Count > 0)
+                {
+                    // 2b. Ăn mục tiêu trong vành đai lửa -> Cảm tử
+                    KillTargetEnemies(piece, targetEnemies);
+                    if (!piece.IsHero)
+                    {
+                        piece.IsAlive = false;
+                    }
+                    piece.X = toX;
+                    piece.Y = toY;
+
+                    StartExplosionAnimation(new Point(toX, toY), defendersAtTarget, () =>
+                    {
+                        FinishTurnAfterMove(piece, toX, toY, primaryTarget);
+                    });
+                    return;
+                }
+
+                // 2c. Không nằm trong 2 trường hợp trên -> Ném bom từ xa (đứng tại chỗ cũ)
+                KillTargetEnemies(piece, targetEnemies);
+                FinishTurnAfterMove(piece, toX, toY, primaryTarget);
+                return;
+            }
+
+            // Trường hợp 3: Di chuyển tới ô trống / ghép quân nhưng ô đích nằm ngay rìa vành đai lửa
+            if (edgeCell.HasValue && !piece.IsHero)
+            {
+                piece.IsAlive = false;
+                piece.X = edgeCell.Value.X;
+                piece.Y = edgeCell.Value.Y;
+
+                StartExplosionAnimation(edgeCell.Value, edgeDefenders, () =>
+                {
+                    FinishTurnAfterMove(piece, edgeCell.Value.X, edgeCell.Value.Y, null);
+                });
+                return;
+            }
+
+            // Di chuyển bình thường an toàn
+            MovePieceWithStack(piece, oldX, oldY, toX, toY);
+            FinishTurnAfterMove(piece, toX, toY, null);
+            return;
+        }
+
+        // =========================================================================
+        // XỬ LÝ CÁC QUÂN CÒN LẠI
+        // =========================================================================
         bool isStandShoot = false;
 
-            if (targetEnemies.Count > 0)
+        if (targetEnemies.Count > 0)
+        {
+            if (piece.Kind == PieceKind.Warship && primaryTarget != null)
             {
-                // Kiểm tra chế độ ăn quân: Bắn tại chỗ / Oanh tạc quay về
-                if (CurrentCaptureMode == CaptureMode.StandStill && HasMultipleCaptureModes(piece.Kind))
+                bool isTargetNavigable = (toX <= 2) || IsDeepRiver(toX, toY);
+                bool isDiagonalAttack = (oldX != toX) && (oldY != toY);
+
+                if (primaryTarget.Kind == PieceKind.Warship)
                 {
-                    isStandShoot = true;
+                    // Hải quân địch: chéo 45 độ có thể Xạ kích nếu chọn StandStill; ngang dọc luôn Thế chỗ
+                    isStandShoot = isDiagonalAttack && CurrentCaptureMode == CaptureMode.StandStill;
+                }
+                else if (isTargetNavigable && !HasLandOnPath(oldX, oldY, toX, toY))
+                {
+                    // Mục tiêu dọc bờ biển hoặc bờ sông (không vướng đất liền) -> Bắt buộc Thế chỗ
+                    isStandShoot = false;
                 }
                 else
                 {
-                    // Quy tắc đứng tại chỗ ăn quân bắt buộc theo địa hình
-                    if (piece.Kind == PieceKind.Tank && IsSea(toX)) isStandShoot = true;
-                    if (piece.Kind == PieceKind.Artillery && IsSea(toX)) isStandShoot = true;
-                    if (piece.Kind == PieceKind.Warship && !IsSea(toX) && !IsDeepRiver(toX, toY)) isStandShoot = true;
+                    // Mục tiêu trên đất liền hoặc bị vướng đất liền -> Xạ kích (đứng tại chỗ)
+                    isStandShoot = true;
                 }
-
-                // Tiêu diệt toàn bộ quân địch tại ô đích (bao gồm cụm quân đang ghép)
-                foreach (var te in targetEnemies)
-                {
-                    te.IsAlive = false;
-                    if (te.Kind == PieceKind.Commander)
-                    {
-                        piece.IsHero = true;
-                        piece.Score += 10;
-                    }
-                }
-
-                    // Quy tắc máy bay bay vào vùng hỏa lực phòng không
-                    if (piece.Kind == PieceKind.AirForce && primaryTarget != null && primaryTarget.Kind != PieceKind.AirForce)
-                    {
-                        bool inEnemyAirDefense = Pieces.Any(p => p.Side != piece.Side && p.IsAlive &&
-                            (p.Kind == PieceKind.AntiAir || p.Kind == PieceKind.Rocket || p.Kind == PieceKind.Warship) &&
-                            (Math.Abs(p.X - toX) <= (p.Kind == PieceKind.Rocket ? 2 : 1) && Math.Abs(p.Y - toY) <= (p.Kind == PieceKind.Rocket ? 2 : 1)));
-
-                        if (inEnemyAirDefense && !piece.IsHero)
-                        {
-                            piece.IsAlive = false;
-                        }
-                    }
+            }
+            // Kiểm tra chế độ ăn quân: Bắn tại chỗ / Oanh tạc quay về
+            else if (CurrentCaptureMode == CaptureMode.StandStill && HasMultipleCaptureModes(piece.Kind))
+            {
+                isStandShoot = true;
+            }
+            else
+            {
+                // Quy tắc đứng tại chỗ ăn quân bắt buộc theo địa hình: bất kỳ quân bộ nào bắn ra biển đều đứng tại chỗ
+                if (IsSea(toX)) isStandShoot = true;
             }
 
-            // Di chuyển vị trí quân
-            if (!isStandShoot)
-            {
-                    // Nếu quân di chuyển là quân cõng (Xe tăng, Máy bay, Tàu chiến) và đang bật cõng cả cụm
-                    var passengers = new List<PieceView>();
-                if (MoveStackTogether && IsCarrier(piece.Kind))
-                {
-                    passengers = Pieces.Where(p => p.X == oldX && p.Y == oldY && p.IsAlive && p != piece && p.Side == piece.Side).ToList();
-                }
-
-            piece.X = toX;
-            piece.Y = toY;
-
-            foreach (var pass in passengers)
-            {
-                pass.X = toX;
-                pass.Y = toY;
-            }
+            KillTargetEnemies(piece, targetEnemies);
         }
 
-        // Đổi lượt đi
+        // Di chuyển vị trí quân
+        if (!isStandShoot)
+        {
+            MovePieceWithStack(piece, oldX, oldY, toX, toY);
+        }
+
+        FinishTurnAfterMove(piece, toX, toY, primaryTarget);
+    }
+
+    private static bool HasLandOnPath(int fromX, int fromY, int toX, int toY)
+    {
+        int dx = Math.Sign(toX - fromX);
+        int dy = Math.Sign(toY - fromY);
+        int steps = Math.Max(Math.Abs(toX - fromX), Math.Abs(toY - fromY));
+        for (int step = 1; step <= steps; step++)
+        {
+            int cx = fromX + dx * step;
+            int cy = fromY + dy * step;
+            if (cx > 2 && !IsDeepRiver(cx, cy))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void KillTargetEnemies(PieceView attacker, List<PieceView> targetEnemies)
+    {
+        foreach (var te in targetEnemies)
+        {
+            te.IsAlive = false;
+            if (te.Kind == PieceKind.Commander)
+            {
+                attacker.IsHero = true;
+                attacker.Score += 10;
+            }
+        }
+    }
+
+    private void MovePieceWithStack(PieceView piece, int oldX, int oldY, int toX, int toY)
+    {
+        var passengers = new List<PieceView>();
+        if (MoveStackTogether && IsCarrier(piece.Kind))
+        {
+            passengers = Pieces.Where(p => p.X == oldX && p.Y == oldY && p.IsAlive && p != piece && p.Side == piece.Side).ToList();
+        }
+
+        piece.X = toX;
+        piece.Y = toY;
+
+        foreach (var pass in passengers)
+        {
+            pass.X = toX;
+            pass.Y = toY;
+        }
+    }
+
+    private void StartExplosionAnimation(Point gridPos, List<PieceView> defenders, Action onComplete)
+    {
+        SelectedPiece = null;
+        ValidMoves.Clear();
+        isAnimatingExplosion = true;
+        animationStartTime = DateTime.Now;
+        explosionGridPos = gridPos;
+        blinkingFireRingPieces = defenders.Distinct().ToList();
+        pendingPostExplosionAction = onComplete;
+        animationTimer.Start();
+        Invalidate();
+    }
+
+    private void FinishTurnAfterMove(PieceView piece, int toX, int toY, PieceView? primaryTarget)
+    {
+        EvaluateHeroPromotions(piece);
         CurrentTurn = CurrentTurn == "red" ? "blue" : "red";
         SelectedPiece = null;
         ValidMoves.Clear();
@@ -739,12 +1018,16 @@ public class BoardControl : UserControl
 
     /// <summary>
     /// Nạp nguyên trạng bàn cờ từ Server (khi game_started hoặc khi kết nối lại giữa ván).
+    /// Đồng bộ chính xác danh sách quân từ Server để không lệch với game_engine.py.
     /// </summary>
     public void LoadBoardFromServer(List<ServerPieceDto>? serverPieces, string currentTurn)
     {
         InitializeStandardPieces();
         if (serverPieces != null && serverPieces.Count > 0)
         {
+            var serverIds = serverPieces.Select(s => s.PieceId).ToHashSet();
+            Pieces.RemoveAll(p => !serverIds.Contains(p.PieceId));
+
             foreach (var dto in serverPieces)
             {
                 var p = Pieces.FirstOrDefault(x => x.PieceId == dto.PieceId);
@@ -836,6 +1119,37 @@ public class BoardControl : UserControl
         OnPieceSelected?.Invoke(null);
         OnStackedGroupSelected?.Invoke(new List<PieceView>());
         Invalidate();
+    }
+
+    /// <summary>
+    /// Quy tắc Quân Anh Hùng theo Rule.pdf (Chế độ Offline Beta1):
+    /// 1) Quân trực tiếp chiếu Tư lệnh đối phương được phong Anh hùng (+1 tầm, +10đ, đi chéo 45°, máy bay tàng hình)
+    /// 2) Quân cuối cùng còn lại bảo vệ Tư lệnh của mỗi bên cũng được phong Anh hùng (kể cả Sở chỉ huy)
+    /// </summary>
+    private void EvaluateHeroPromotions(PieceView movedPiece)
+    {
+        if (movedPiece.IsAlive && !movedPiece.IsHero && movedPiece.Kind != PieceKind.Commander && movedPiece.Kind != PieceKind.Headquarter)
+        {
+            string enemySide = movedPiece.Side == "red" ? "blue" : "red";
+            var enemyCmd = Pieces.FirstOrDefault(p => p.Side == enemySide && p.Kind == PieceKind.Commander && p.IsAlive);
+            if (enemyCmd != null && GetValidMoves(movedPiece).Any(m => m.X == enemyCmd.X && m.Y == enemyCmd.Y))
+            {
+                movedPiece.IsHero = true;
+                movedPiece.Score += 10;
+            }
+        }
+
+        foreach (var side in new[] { "red", "blue" })
+        {
+            var cmd = Pieces.FirstOrDefault(p => p.Side == side && p.Kind == PieceKind.Commander && p.IsAlive);
+            if (cmd == null) continue;
+            var defenders = Pieces.Where(p => p.Side == side && p.IsAlive && p.Kind != PieceKind.Commander).ToList();
+            if (defenders.Count == 1 && !defenders[0].IsHero)
+            {
+                defenders[0].IsHero = true;
+                defenders[0].Score += 10;
+            }
+        }
     }
 
     protected override void OnResize(EventArgs e)
@@ -936,10 +1250,38 @@ public class BoardControl : UserControl
                 DrawFireThreatCircles(g, SelectedPiece, isInspected: false);
             }
 
+            // Khi chọn Không quân: hiển thị tất cả vành đai lửa phòng không của đối phương (Cao xạ, Tên lửa, Tàu chiến)
+            if (SelectedPiece != null && SelectedPiece.IsAlive && SelectedPiece.Kind == PieceKind.AirForce)
+            {
+                var enemyAirDefenders = Pieces.Where(p => p.IsAlive && p.Side != SelectedPiece.Side &&
+                    (p.Kind == PieceKind.AntiAir || p.Kind == PieceKind.Rocket || p.Kind == PieceKind.Warship));
+                foreach (var defender in enemyAirDefenders)
+                {
+                    if (defender != InspectedFirePiece)
+                    {
+                        DrawFireThreatCircles(g, defender, isInspected: false);
+                    }
+                }
+            }
+
         // Khi người chơi click chuột phải vào bất kỳ quân có vành đai lửa (cả 2 bên đều xem được)
         if (InspectedFirePiece != null && InspectedFirePiece.IsAlive && InspectedFirePiece != SelectedPiece)
         {
             DrawFireThreatCircles(g, InspectedFirePiece, isInspected: true);
+        }
+
+        // Hiệu ứng nhấp nháy của (các) vành đai lửa gây ra vụ nổ trong 2 giây
+        if (isAnimatingExplosion && blinkingFireRingPieces.Count > 0)
+        {
+            double elapsedMs = (DateTime.Now - animationStartTime).TotalMilliseconds;
+            bool blinkOn = ((int)(elapsedMs / 160) % 2) == 0;
+            foreach (var defender in blinkingFireRingPieces)
+            {
+                if (defender.IsAlive)
+                {
+                    DrawFireThreatCircles(g, defender, isInspected: false, isBlinking: true, blinkOn: blinkOn);
+                }
+            }
         }
 
         // 7. Vẽ CÁC Ô GỢI Ý NƯỚC ĐI HỢP LỆ (HIGHTLIGHT VALID MOVES)
@@ -1045,6 +1387,13 @@ public class BoardControl : UserControl
             }
         }
 
+        // 10.5. Vẽ HIỆU ỨNG NỔ 2D (khi Không quân bay qua hoặc cảm tử trong vành đai lửa)
+        if (isAnimatingExplosion && explosionGridPos.HasValue)
+        {
+            float progress = Math.Clamp((float)((DateTime.Now - animationStartTime).TotalMilliseconds / ExplosionDurationMs), 0f, 1f);
+            DrawExplosion2D(g, explosionGridPos.Value, progress);
+        }
+
         // 11. Vẽ TÊN QUÂN CỜ KHI RÊ CHUỘT (HOVER TOOLTIP BADGE)
         if (hoverGrid.HasValue)
         {
@@ -1117,7 +1466,7 @@ public class BoardControl : UserControl
         g.DrawString("SỞ CHỈ HUY", font, textBrush, pt.X, pt.Y + r + 8, sf);
     }
 
-    private void DrawFireThreatCircles(Graphics g, PieceView piece, bool isInspected = false)
+    private void DrawFireThreatCircles(Graphics g, PieceView piece, bool isInspected = false, bool isBlinking = false, bool blinkOn = true)
     {
         var pt = GridToScreen(piece.X, piece.Y);
         float ringRadiusCells = GetFireRingRadius(piece.Kind);
@@ -1125,33 +1474,48 @@ public class BoardControl : UserControl
 
         float radius = ringRadiusCells * cellWidth;
 
-            Color baseColor = isInspected
+        Color baseColor = isBlinking
+            ? (blinkOn ? Color.FromArgb(255, 70, 20) : Color.FromArgb(243, 156, 18))
+            : (isInspected
                 ? Color.FromArgb(243, 156, 18) // Hổ phách/vàng rực khi soi bằng chuột phải
-                : (piece.Side == "red" ? Color.FromArgb(231, 76, 60) : Color.FromArgb(52, 152, 219));
+                : (piece.Side == "red" ? Color.FromArgb(231, 76, 60) : Color.FromArgb(52, 152, 219)));
+
+        int fillAlpha = isBlinking ? (blinkOn ? 95 : 18) : 30;
+        int penAlpha = isBlinking ? (blinkOn ? 255 : 70) : 210;
+        float penWidth = isBlinking ? (blinkOn ? 3.8f : 1.5f) : (isInspected ? 2.5f : 2.0f);
 
         // 1. Vùng bóng lửa mờ bao phủ
-        using (var zoneBrush = new SolidBrush(Color.FromArgb(30, baseColor)))
+        using (var zoneBrush = new SolidBrush(Color.FromArgb(fillAlpha, baseColor)))
         {
             g.FillEllipse(zoneBrush, pt.X - radius, pt.Y - radius, radius * 2, radius * 2);
         }
 
         // 2. Viền đứt đoạn vành đai lửa
-        using (var ringPen = new Pen(Color.FromArgb(210, baseColor), isInspected ? 2.5f : 2.0f))
+        using (var ringPen = new Pen(Color.FromArgb(penAlpha, baseColor), penWidth))
         {
-            ringPen.DashStyle = DashStyle.Dash;
+            ringPen.DashStyle = isBlinking && blinkOn ? DashStyle.Solid : DashStyle.Dash;
             g.DrawEllipse(ringPen, pt.X - radius, pt.Y - radius, radius * 2, radius * 2);
         }
 
         // 3. Vòng tròn phụ bên trong
-        using (var innerPen = new Pen(Color.FromArgb(90, baseColor), 1.0f))
+        using (var innerPen = new Pen(Color.FromArgb(isBlinking && blinkOn ? 180 : 90, baseColor), 1.0f))
         {
             g.DrawEllipse(innerPen, pt.X - radius * 0.7f, pt.Y - radius * 0.7f, radius * 1.4f, radius * 1.4f);
         }
 
+        if (isBlinking && blinkOn)
+        {
+            int pr = (int)(Math.Min(cellWidth, cellHeight) * 0.50);
+            using var flashPen = new Pen(Color.FromArgb(240, 255, 220, 50), 3.0f);
+            g.DrawEllipse(flashPen, pt.X - pr, pt.Y - pr, pr * 2, pr * 2);
+        }
+
         // 4. Nhãn vành đai lửa
-        string label = isInspected
-            ? $"🔥 [SOI CHUỘT PHẢI] {piece.DisplayName} ({(piece.Side == "red" ? "Đỏ" : "Xanh")}) • R={ringRadiusCells}"
-            : $"🔥 VÀNH ĐAI LỬA: {piece.DisplayName} • R={ringRadiusCells}";
+        string label = isBlinking
+            ? $"🔥 HỎA LỰC PHÒNG KHÔNG: {piece.DisplayName}!"
+            : (isInspected
+                ? $"🔥 [SOI CHUỘT PHẢI] {piece.DisplayName} ({(piece.Side == "red" ? "Đỏ" : "Xanh")}) • R={ringRadiusCells}"
+                : $"🔥 VÀNH ĐAI LỬA: {piece.DisplayName} • R={ringRadiusCells}");
 
         using var labelFont = new Font("Segoe UI", 7.5F, FontStyle.Bold);
         var labelSize = g.MeasureString(label, labelFont);
@@ -1171,6 +1535,93 @@ public class BoardControl : UserControl
             var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             g.DrawString(label, labelFont, textBrush, labelRect, sf);
         }
+    }
+
+    private void DrawExplosion2D(Graphics g, Point gridPos, float progress)
+    {
+        var pt = GridToScreen(gridPos.X, gridPos.Y);
+        float baseSize = Math.Min(cellWidth, cellHeight);
+        float fade = 1f - (float)Math.Pow(progress, 1.5);
+        int alpha = Math.Clamp((int)(255 * fade), 0, 255);
+
+        // 1. Sóng xung kích lan tỏa (Shockwave ring)
+        float shockR = baseSize * (0.25f + progress * 0.95f);
+        int shockAlpha = Math.Clamp((int)(220 * (1f - progress)), 0, 255);
+        using (var shockPen = new Pen(Color.FromArgb(shockAlpha, 255, 180, 60), 3.0f * (1f - progress * 0.6f)))
+        {
+            g.DrawEllipse(shockPen, pt.X - shockR, pt.Y - shockR, shockR * 2, shockR * 2);
+        }
+
+        // 2. Đám mây khói 2D (nửa sau vụ nổ)
+        if (progress > 0.15f)
+        {
+            float smokeProgress = (progress - 0.15f) / 0.85f;
+            int smokeAlpha = Math.Clamp((int)(140 * (1f - smokeProgress)), 0, 255);
+            for (int i = 0; i < 6; i++)
+            {
+                double angle = i * Math.PI / 3.0 + 0.3;
+                float dist = baseSize * 0.25f * smokeProgress;
+                float sx = pt.X + (float)Math.Cos(angle) * dist;
+                float sy = pt.Y + (float)Math.Sin(angle) * dist - smokeProgress * 8f;
+                float sr = baseSize * (0.18f + 0.14f * smokeProgress);
+                using var smokeBrush = new SolidBrush(Color.FromArgb(smokeAlpha, 70, 70, 75));
+                g.FillEllipse(smokeBrush, sx - sr, sy - sr, sr * 2, sr * 2);
+            }
+        }
+
+        // 3. Ngôi sao vụ nổ 2D đa lớp (Đỏ cam -> Vàng -> Lõi trắng)
+        float pulse = progress < 0.2f
+            ? (progress / 0.2f)
+            : (1f - (progress - 0.2f) * 0.35f) * (0.90f + 0.10f * (float)Math.Sin(progress * 28f));
+        float outerR = baseSize * 0.56f * Math.Max(0.2f, pulse);
+        float innerR = outerR * 0.45f;
+
+        DrawStarburst(g, pt, 12, outerR, innerR, Color.FromArgb(alpha, 231, 76, 60));
+        DrawStarburst(g, pt, 10, outerR * 0.72f, innerR * 0.68f, Color.FromArgb(alpha, 243, 156, 18));
+        DrawStarburst(g, pt, 8, outerR * 0.42f, innerR * 0.40f, Color.FromArgb(alpha, 255, 250, 200));
+
+        // 4. Tia lửa bắn văng ra xung quanh
+        int sparkCount = 10;
+        for (int i = 0; i < sparkCount; i++)
+        {
+            double angle = i * (2 * Math.PI / sparkCount) + 0.2;
+            float dist1 = baseSize * (0.18f + progress * 0.55f);
+            float dist2 = dist1 + baseSize * 0.16f * (1f - progress);
+            float x1 = pt.X + (float)Math.Cos(angle) * dist1;
+            float y1 = pt.Y + (float)Math.Sin(angle) * dist1;
+            float x2 = pt.X + (float)Math.Cos(angle) * dist2;
+            float y2 = pt.Y + (float)Math.Sin(angle) * dist2;
+
+            using var sparkPen = new Pen(Color.FromArgb(alpha, 255, 225, 90), 2.2f);
+            g.DrawLine(sparkPen, x1, y1, x2, y2);
+        }
+
+        // 5. Nhãn thông báo nổ ngay trên ô
+        using var font = new Font("Segoe UI", 8F, FontStyle.Bold);
+        string msg = "💥 PHÁT NỔ!";
+        var sz = g.MeasureString(msg, font);
+        var rect = new RectangleF(pt.X - sz.Width / 2 - 4, pt.Y - outerR - sz.Height - 4, sz.Width + 8, sz.Height + 2);
+        using var bg = new SolidBrush(Color.FromArgb(Math.Clamp((int)(220 * fade), 0, 220), 30, 10, 10));
+        using var border = new Pen(Color.FromArgb(alpha, 255, 120, 40), 1.2f);
+        using var txt = new SolidBrush(Color.FromArgb(alpha, 255, 245, 200));
+        g.FillRectangle(bg, rect);
+        g.DrawRectangle(border, rect.X, rect.Y, rect.Width, rect.Height);
+        var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        g.DrawString(msg, font, txt, rect, sf);
+    }
+
+    private static void DrawStarburst(Graphics g, Point center, int spikes, float outerR, float innerR, Color color)
+    {
+        var pts = new PointF[spikes * 2];
+        double step = Math.PI / spikes;
+        for (int i = 0; i < spikes * 2; i++)
+        {
+            double r = (i % 2 == 0) ? outerR : innerR;
+            double angle = i * step - Math.PI / 2;
+            pts[i] = new PointF(center.X + (float)(Math.Cos(angle) * r), center.Y + (float)(Math.Sin(angle) * r));
+        }
+        using var brush = new SolidBrush(color);
+        g.FillPolygon(brush, pts);
     }
 
     public Point GridToScreen(int gx, int gy)
@@ -1349,6 +1800,7 @@ public class BoardControl : UserControl
     protected override void OnMouseClick(MouseEventArgs e)
     {
         base.OnMouseClick(e);
+        if (isAnimatingExplosion) return;
         if (e.Button != MouseButtons.Left) return;
 
         var grid = ScreenToGrid(e.X, e.Y);
