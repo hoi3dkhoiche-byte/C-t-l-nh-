@@ -53,6 +53,45 @@ public class BoardControl : UserControl
     public event Action<CaptureMode>? OnCaptureModeChanged;
     public event Action<List<PieceView>>? OnStackedGroupSelected;
     public event Action<PieceView?>? OnFireRingInspected;
+    public event Action? OnDeploymentStateChanged;
+
+    private sealed class PieceSnapshot
+    {
+        public string PieceId { get; init; } = "";
+        public int X { get; init; }
+        public int Y { get; init; }
+        public bool IsAlive { get; init; }
+        public bool IsHero { get; init; }
+        public int Score { get; init; }
+    }
+
+    private sealed class DeploymentStepSnapshot
+    {
+        public List<PieceSnapshot> BoardState { get; init; } = new();
+        public List<string> PendingPieceIds { get; init; } = new();
+    }
+
+    // Trạng thái Nước đi dàn trận (khi tách quân khỏi cụm ghép)
+    private bool isInDeployment = false;
+    private readonly List<PieceView> deploymentPendingPieces = new();
+    private readonly Stack<DeploymentStepSnapshot> deploymentHistory = new();
+    private int pendingMoveOriginX;
+    private int pendingMoveOriginY;
+    private List<PieceView> pendingOtherStackPieces = new();
+    private DeploymentStepSnapshot? pendingPreMoveSnapshot = null;
+    private bool pendingMoveIsBot = false;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
+    public bool IsInDeployment => isInDeployment;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
+    public IReadOnlyList<PieceView> DeploymentPendingPieces => deploymentPendingPieces;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
+    public bool CanUndoDeployment => deploymentHistory.Count > 0;
 
     private Point? hoverGrid = null;
     private int cellWidth = 50;
@@ -414,6 +453,12 @@ public class BoardControl : UserControl
     {
         var moves = new List<Point>();
         if (!piece.IsAlive) return moves;
+
+        // Chỉ Hải quân và Không quân (đang đậu trên Hải quân) mới có nước đi khi đang ở ô biển (X < 2)
+        if (IsSea(piece.X) && piece.Kind != PieceKind.Warship && piece.Kind != PieceKind.AirForce)
+        {
+            return moves;
+        }
 
         int bonus = piece.IsHero ? 1 : 0; // Quân anh hùng được cộng thêm 1 nấc di chuyển/ăn quân
 
@@ -836,7 +881,7 @@ public class BoardControl : UserControl
 
     private static bool InBounds(int x, int y) => x >= 0 && x < COLS && y >= 0 && y < ROWS;
     private static bool IsCrossingRiver(int fromY, int toY) => (fromY <= 5 && toY >= 6) || (fromY >= 6 && toY <= 5);
-    private static bool IsDeepRiver(int x, int y) => (y == 5 || y == 6) && (x != 5 && x != 7);
+    private static bool IsDeepRiver(int x, int y) => x > 2 && (y == 5 || y == 6) && (x != 5 && x != 7);
 
     public PieceView? GetPieceAt(int x, int y) => Pieces.FirstOrDefault(p => p.X == x && p.Y == y && p.IsAlive);
 
@@ -899,6 +944,12 @@ public class BoardControl : UserControl
         int oldX = piece.X;
         int oldY = piece.Y;
 
+        pendingMoveOriginX = oldX;
+        pendingMoveOriginY = oldY;
+        pendingOtherStackPieces = Pieces.Where(p => p.IsAlive && p.Side == piece.Side && p.X == oldX && p.Y == oldY && p != piece).ToList();
+        pendingPreMoveSnapshot = CaptureDeploymentSnapshot();
+        pendingMoveIsBot = forcedCaptureMode.HasValue;
+
         // Lấy danh sách quân địch tại ô đích
         var targetEnemies = GetPiecesAt(toX, toY).Where(p => p.Side != piece.Side).ToList();
         PieceView? primaryTarget = targetEnemies.FirstOrDefault();
@@ -929,22 +980,24 @@ public class BoardControl : UserControl
             {
                 var defendersAtTarget = GetEnemyAntiAirDefendersAt(piece.Side, toX, toY);
                 if (defendersAtTarget.Count > 0)
-                {
-                    // Mục tiêu nằm trong vành đai lửa (và đường bay không đi qua ô vành đai lửa nào trước đó) -> 1 đổi 1 (Cảm tử)
-                    KillTargetEnemies(piece, targetEnemies);
-                    if (!piece.IsHero)
+                    if (defendersAtTarget.Count > 0 && !piece.IsHero)
                     {
+                        // Mục tiêu nằm trong vành đai lửa (và đường bay không đi qua ô vành đai lửa nào trước đó) -> 1 đổi 1 (Cảm tử)
+                        KillTargetEnemies(piece, targetEnemies);
+                        if (!piece.IsHero)
+                        {
+                            piece.IsAlive = false;
+                        }
                         piece.IsAlive = false;
-                    }
-                    piece.X = toX;
-                    piece.Y = toY;
+                        piece.X = toX;
+                        piece.Y = toY;
 
-                    StartExplosionAnimation(new Point(toX, toY), defendersAtTarget, () =>
-                    {
-                        FinishTurnAfterMove(piece, toX, toY, primaryTarget);
-                    });
-                    return;
-                }
+                        StartExplosionAnimation(new Point(toX, toY), defendersAtTarget, () =>
+                        {
+                            FinishTurnAfterMove(piece, toX, toY, primaryTarget);
+                        });
+                        return;
+                    }
 
                 if (primaryTarget.Kind == PieceKind.AirForce)
                 {
@@ -1418,25 +1471,139 @@ public class BoardControl : UserControl
         Invalidate();
     }
 
-    private void FinishTurnAfterMove(PieceView piece, int toX, int toY, PieceView? primaryTarget, bool isFreeAction = false)
+    private DeploymentStepSnapshot CaptureDeploymentSnapshot()
     {
-        EvaluateHeroPromotions(piece);
-        if (!isFreeAction)
+        return new DeploymentStepSnapshot
         {
-            CurrentTurn = CurrentTurn == "red" ? "blue" : "red";
-        }
+            BoardState = Pieces.Select(p => new PieceSnapshot
+            {
+                PieceId = p.PieceId,
+                X = p.X,
+                Y = p.Y,
+                IsAlive = p.IsAlive,
+                IsHero = p.IsHero,
+                Score = p.Score
+            }).ToList(),
+            PendingPieceIds = deploymentPendingPieces.Select(p => p.PieceId).ToList()
+        };
+    }
+
+    public void EndDeployment()
+    {
+        if (!isInDeployment) return;
+        isInDeployment = false;
+        deploymentPendingPieces.Clear();
+        deploymentHistory.Clear();
+        CurrentTurn = CurrentTurn == "red" ? "blue" : "red";
         SelectedPiece = null;
         ValidMoves.Clear();
         Invalidate();
+        OnDeploymentStateChanged?.Invoke();
+    }
 
+    public void UndoDeploymentStep()
+    {
+        if (!isInDeployment || deploymentHistory.Count == 0) return;
+
+        var snap = deploymentHistory.Pop();
+        foreach (var ps in snap.BoardState)
+        {
+            var target = Pieces.FirstOrDefault(p => p.PieceId == ps.PieceId);
+            if (target != null)
+            {
+                target.X = ps.X;
+                target.Y = ps.Y;
+                target.IsAlive = ps.IsAlive;
+                target.IsHero = ps.IsHero;
+                target.Score = ps.Score;
+            }
+        }
+
+        deploymentPendingPieces.Clear();
+        foreach (var id in snap.PendingPieceIds)
+        {
+            var p = Pieces.FirstOrDefault(x => x.PieceId == id && x.IsAlive);
+            if (p != null) deploymentPendingPieces.Add(p);
+        }
+
+        if (deploymentHistory.Count == 0)
+        {
+            isInDeployment = false;
+            deploymentPendingPieces.Clear();
+        }
+
+        SelectedPiece = null;
+        ValidMoves.Clear();
+        Invalidate();
+        OnDeploymentStateChanged?.Invoke();
+    }
+
+    private void FinishTurnAfterMove(PieceView piece, int toX, int toY, PieceView? primaryTarget, bool isFreeAction = false)
+    {
+        EvaluateHeroPromotions(piece);
         if (isFreeAction)
         {
+            SelectedPiece = null;
+            ValidMoves.Clear();
+            Invalidate();
             OnFreeAntiAirStrike?.Invoke(piece, toX, toY, primaryTarget);
+            return;
+        }
+
+        if (!isInDeployment)
+        {
+            var remaining = pendingOtherStackPieces
+                .Where(p => p.IsAlive && p.X == pendingMoveOriginX && p.Y == pendingMoveOriginY &&
+                            (p.Kind != PieceKind.Headquarter || p.IsHero) &&
+                            (!IsSea(pendingMoveOriginX) || p.Kind == PieceKind.Warship))
+                .ToList();
+
+            // Hải quân chở quân từ ô biển (X < 2) cập bến bờ biển (X == 2) hoặc bờ sông -> các quân được chở có lượt dàn trận
+            if (remaining.Count == 0 && piece.Kind == PieceKind.Warship && IsSea(pendingMoveOriginX) &&
+                (toX == 2 || IsDeepRiver(toX, toY)))
+            {
+                remaining = pendingOtherStackPieces
+                    .Where(p => p.IsAlive && p.X == toX && p.Y == toY &&
+                                (p.Kind != PieceKind.Headquarter || p.IsHero))
+                    .ToList();
+            }
+
+            if (remaining.Count > 0 && !pendingMoveIsBot && pendingPreMoveSnapshot != null)
+            {
+                isInDeployment = true;
+                deploymentHistory.Clear();
+                deploymentHistory.Push(pendingPreMoveSnapshot);
+                deploymentPendingPieces.Clear();
+                deploymentPendingPieces.AddRange(remaining);
+                SelectedPiece = null;
+                ValidMoves.Clear();
+                Invalidate();
+                OnDeploymentStateChanged?.Invoke();
+                OnPieceMoved?.Invoke(piece, toX, toY, primaryTarget);
+                return;
+            }
+
+            CurrentTurn = CurrentTurn == "red" ? "blue" : "red";
         }
         else
         {
+            if (pendingPreMoveSnapshot != null)
+            {
+                deploymentHistory.Push(pendingPreMoveSnapshot);
+            }
+            deploymentPendingPieces.RemoveAll(p => !p.IsAlive || p == piece || p.X != pendingMoveOriginX || p.Y != pendingMoveOriginY);
+            SelectedPiece = null;
+            ValidMoves.Clear();
+            Invalidate();
+            OnDeploymentStateChanged?.Invoke();
             OnPieceMoved?.Invoke(piece, toX, toY, primaryTarget);
+            return;
         }
+
+        SelectedPiece = null;
+        ValidMoves.Clear();
+        Invalidate();
+        OnPieceMoved?.Invoke(piece, toX, toY, primaryTarget);
     }
 
     /// <summary>
@@ -1596,17 +1763,19 @@ public class BoardControl : UserControl
 
         // Khi chọn Không quân: hiển thị tất cả vành đai lửa phòng không của đối phương (Cao xạ, Tên lửa, Tàu chiến)
         if (SelectedPiece != null && SelectedPiece.IsAlive && SelectedPiece.Kind == PieceKind.AirForce)
-        {
-            var enemyAirDefenders = Pieces.Where(p => p.IsAlive && p.Side != SelectedPiece.Side &&
-                (p.Kind == PieceKind.AntiAir || p.Kind == PieceKind.Rocket || p.Kind == PieceKind.Warship));
-            foreach (var defender in enemyAirDefenders)
+            // Khi chọn Không quân thường: hiển thị tất cả vành đai lửa phòng không của đối phương (Không quân Anh hùng tàng hình -> không cần hiện)
+            if (SelectedPiece != null && SelectedPiece.IsAlive && SelectedPiece.Kind == PieceKind.AirForce && !SelectedPiece.IsHero)
             {
-                if (defender != InspectedFirePiece)
+                var enemyAirDefenders = Pieces.Where(p => p.IsAlive && p.Side != SelectedPiece.Side &&
+                    (p.Kind == PieceKind.AntiAir || p.Kind == PieceKind.Rocket || p.Kind == PieceKind.Warship));
+                foreach (var defender in enemyAirDefenders)
                 {
-                    DrawFireThreatCircles(g, defender, isInspected: false);
+                    if (defender != InspectedFirePiece)
+                    {
+                        DrawFireThreatCircles(g, defender, isInspected: false);
+                    }
                 }
             }
-        }
 
         // Khi người chơi click chuột phải vào bất kỳ quân có vành đai lửa (cả 2 bên đều xem được)
         if (InspectedFirePiece != null && InspectedFirePiece.IsAlive && InspectedFirePiece != SelectedPiece)
@@ -1687,7 +1856,19 @@ public class BoardControl : UserControl
             g.FillEllipse(hoverBrush, hpt.X - cellWidth / 3, hpt.Y - cellHeight / 3, cellWidth * 2 / 3, cellHeight * 2 / 3);
         }
 
-        // 9. Vẽ Highlight quân đang được chọn
+        // 9. Vẽ Highlight quân đang được chọn và các quân còn lượt dàn trận
+        if (isInDeployment && deploymentPendingPieces.Count > 0)
+        {
+            foreach (var dp in deploymentPendingPieces)
+            {
+                if (!dp.IsAlive) continue;
+                var dpt = GridToScreen(dp.X, dp.Y);
+                int dsize = (int)(Math.Min(cellWidth, cellHeight) * 0.94);
+                using var depPen = new Pen(Color.FromArgb(46, 204, 113), 3f);
+                g.DrawEllipse(depPen, dpt.X - dsize / 2 - 4, dpt.Y - dsize / 2 - 4, dsize + 8, dsize + 8);
+            }
+        }
+
         if (SelectedPiece != null && SelectedPiece.IsAlive)
         {
             var spt = GridToScreen(SelectedPiece.X, SelectedPiece.Y);
@@ -2276,6 +2457,10 @@ public class BoardControl : UserControl
             var hitbox = stackMiniIconHitboxes[i];
             if (hitbox.Rect.Contains(e.Location) && hitbox.Piece.IsAlive && hitbox.Piece.Side == CurrentTurn)
             {
+                if (isInDeployment && !deploymentPendingPieces.Contains(hitbox.Piece))
+                {
+                    continue;
+                }
                 // Nếu đang có quân khác được chọn và ô này không phải là ô đích hợp lệ (hoặc đang chọn trong cùng cụm)
                 var groupPieces = GetPiecesAt(hitbox.Piece.X, hitbox.Piece.Y);
                 if (SelectedPiece == null || SelectedPiece.Side == CurrentTurn && !ValidMoves.Any(m => m.X == hitbox.Piece.X && m.Y == hitbox.Piece.Y))
@@ -2295,6 +2480,10 @@ public class BoardControl : UserControl
 
         var piecesAtTile = GetPiecesAt(gx, gy);
         var friendlyPieces = piecesAtTile.Where(p => p.Side == CurrentTurn).ToList();
+        if (isInDeployment)
+        {
+            friendlyPieces = friendlyPieces.Where(p => deploymentPendingPieces.Contains(p)).ToList();
+        }
 
         if (SelectedPiece == null)
         {

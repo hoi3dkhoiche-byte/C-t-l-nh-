@@ -72,15 +72,62 @@ public class PieceView
         // 4. Vẽ biểu tượng quân cờ (Logo/Icon vector ở chính giữa quân)
         DrawPieceIcon(g, rect);
 
-        // 5. Huy hiệu Quân Anh Hùng (nếu có)
+        // 5. Huy hiệu Quân Anh Hùng: khung vòng nguyệt quế màu vàng + ngôi sao ở giữa dưới (theo mẫu)
         if (IsHero)
         {
-            using (var heroBrush = new SolidBrush(Color.FromArgb(241, 196, 15)))
-            using (var heroFont = new Font("Segoe UI", 7F, FontStyle.Bold))
-            {
-                g.FillEllipse(heroBrush, rect.Right - 12, rect.Y, 12, 12);
-                g.DrawString("★", heroFont, Brushes.Black, rect.Right - 12, rect.Y - 1);
-            }
+            DrawHeroLaurelWreath(g, rect);
+        }
+    }
+
+    private void DrawHeroLaurelWreath(Graphics g, Rectangle rect)
+    {
+        float cx = rect.X + rect.Width / 2f;
+        float cy = rect.Y + rect.Height / 2f;
+        float radius = (Math.Min(rect.Width, rect.Height) - 13f) / 2f;
+        if (radius <= 4f) return;
+
+        Color goldYellow = Color.FromArgb(248, 228, 48);
+
+        using var stemPen = new Pen(goldYellow, 1.1f);
+        using var leafBrush = new SolidBrush(goldYellow);
+
+        // Hai nhánh vòng nguyệt quế đối xứng trái/phải nằm gọn trong vòng tròn quân cờ
+        RectangleF arcRect = new(cx - radius, cy - radius, radius * 2f, radius * 2f);
+        g.DrawArc(stemPen, arcRect, 118f, 134f);  // Nhánh trái: từ dưới lên gần đỉnh
+        g.DrawArc(stemPen, arcRect, 62f, -134f);  // Nhánh phải: từ dưới lên gần đỉnh
+
+        // Vẽ các cặp lá chữ V đối xứng dọc theo 2 nhánh
+        int pairCount = 9;
+        for (int i = 0; i < pairCount; i++)
+        {
+            float t = i / (float)(pairCount - 1);
+            double leftAngle = 122.0 + t * 124.0;
+            // Tiếp tuyến hướng lên của nhánh trái = leftAngle + 90°, quy đổi sang RotateTransform (+90°) => leftAngle + 180°
+            DrawLaurelLeafPair(g, cx, cy, radius, leftAngle, (float)(leftAngle + 180.0), leafBrush);
+
+            double rightAngle = 58.0 - t * 124.0;
+            // Tiếp tuyến hướng lên của nhánh phải = rightAngle - 90°, quy đổi sang RotateTransform (+90°) => rightAngle
+            DrawLaurelLeafPair(g, cx, cy, radius, rightAngle, (float)rightAngle, leafBrush);
+        }
+
+        // Ngôi sao vàng nằm chính giữa khoảng trống 2 cuống lá phía dưới
+        float starY = cy + radius * 0.96f;
+        DrawStar(g, cx, starY, 4.2f, 1.8f, goldYellow);
+    }
+
+    private static void DrawLaurelLeafPair(Graphics g, float cx, float cy, float radius, double angleDeg, float forwardRotateDeg, Brush fill)
+    {
+        double rad = angleDeg * Math.PI / 180.0;
+        float lx = cx + (float)(Math.Cos(rad) * radius);
+        float ly = cy + (float)(Math.Sin(rad) * radius);
+
+        foreach (float offset in new[] { -34f, 34f })
+        {
+            var state = g.Save();
+            g.TranslateTransform(lx, ly);
+            g.RotateTransform(forwardRotateDeg + offset);
+            g.FillEllipse(fill, -1.2f, -4.2f, 2.4f, 4.4f);
+            g.Restore(state);
         }
     }
 

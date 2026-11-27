@@ -22,6 +22,7 @@ public partial class GamePlayForm : BaseForm
         board.OnPieceMoved += Board_OnPieceMoved;
         board.OnFreeAntiAirStrike += Board_OnFreeAntiAirStrike;
         board.OnFireRingInspected += Board_OnFireRingInspected;
+        board.OnDeploymentStateChanged += Board_OnDeploymentStateChanged;
 
         gameTimer.Interval = 1000;
         gameTimer.Tick += GameTimer_Tick;
@@ -69,6 +70,25 @@ public partial class GamePlayForm : BaseForm
             }
         };
         pnlRight.Controls.Add(btnToggleBot);
+
+        btnEndDeployment.Click += (s, ev) =>
+        {
+            board.EndDeployment();
+            currentTurnSeconds = 45;
+            UpdateTurnDisplay();
+            UpdateScores();
+            lstChat.Items.Add("[Dàn trận] Đã kết thúc nước đi dàn trận, chuyển lượt.");
+            lstChat.TopIndex = lstChat.Items.Count - 1;
+            TriggerBotIfNeeded();
+        };
+
+        btnUndoDeployment.Click += (s, ev) =>
+        {
+            board.UndoDeploymentStep();
+            UpdateScores();
+            lstChat.Items.Add("[Dàn trận] Đã hoàn tác bước dàn trận.");
+            lstChat.TopIndex = lstChat.Items.Count - 1;
+        };
 
         lstChat.Items.Add("[Hệ thống] Trận đấu Cờ Tư Lệnh bắt đầu! (Chế độ: TẤN CÔNG TỔNG LỰC - 30 phút)");
         lstChat.Items.Add("[Hệ thống] Điều kiện thắng: Diệt Tư lệnh đối phương (+50đ) hoặc hơn tổng điểm sau 30 phút.");
@@ -135,10 +155,55 @@ public partial class GamePlayForm : BaseForm
         if (currentTurnSeconds <= 0)
         {
             currentTurnSeconds = 45;
-            // Hết giờ -> Đổi lượt
-            board.CurrentTurn = board.CurrentTurn == "red" ? "blue" : "red";
+            // Hết giờ -> Nếu đang dàn trận thì kết thúc dàn trận, ngược lại đổi lượt
+            if (board.IsInDeployment)
+            {
+                board.EndDeployment();
+            }
+            else
+            {
+                board.CurrentTurn = board.CurrentTurn == "red" ? "blue" : "red";
+            }
             UpdateTurnDisplay();
             lstChat.Items.Add("[Hệ thống] Hết thời gian lượt đi!");
+            TriggerBotIfNeeded();
+        }
+    }
+
+    private void Board_OnDeploymentStateChanged()
+    {
+        pnlDeployment.Visible = board.IsInDeployment;
+        if (board.IsInDeployment)
+        {
+            var pending = board.DeploymentPendingPieces;
+            if (pending.Count > 0)
+            {
+                string listStr = string.Join(", ", pending.Select(p => $"{p.DisplayName} ({p.X},{p.Y})"));
+                lblDeploymentInfo.Text = $"Còn lượt dàn trận: {listStr}";
+            }
+            else
+            {
+                lblDeploymentInfo.Text = "Cả cụm đã hết lượt dàn trận. Bấm Kết thúc hoặc Hoàn tác.";
+            }
+            btnUndoDeployment.Enabled = board.CanUndoDeployment;
+        }
+    }
+
+    private void TriggerBotIfNeeded()
+    {
+        if (isBotEnabled && board.CurrentTurn == "blue" && !board.IsInDeployment)
+        {
+            Task.Delay(1000).ContinueWith(_ =>
+            {
+                if (this.IsDisposed) return;
+                this.Invoke(() =>
+                {
+                    if (isBotEnabled && board.CurrentTurn == "blue" && !board.IsInDeployment)
+                    {
+                        SimulateOpponentMove();
+                    }
+                });
+            });
         }
     }
 
@@ -236,7 +301,10 @@ public partial class GamePlayForm : BaseForm
         lstMoveLog.Items.Add(log);
         lstMoveLog.TopIndex = lstMoveLog.Items.Count - 1;
 
-        currentTurnSeconds = 45;
+        if (!board.IsInDeployment)
+        {
+            currentTurnSeconds = 45;
+        }
         UpdateTurnDisplay();
         UpdateScores();
 

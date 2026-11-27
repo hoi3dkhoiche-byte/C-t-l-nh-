@@ -33,6 +33,13 @@ partial class GamePlayForm
     private Panel pnlTurn;
     private Label lblTurn;
 
+    // Deployment Panel (Nước đi dàn trận)
+    private Panel pnlDeployment;
+    private Label lblDeploymentTitle;
+    private Label lblDeploymentInfo;
+    private Button btnEndDeployment;
+    private Button btnUndoDeployment;
+
     // Right Controls
     private Label lblLogTitle;
     private ListBox lstMoveLog;
@@ -65,6 +72,12 @@ partial class GamePlayForm
         pnlTurn = new Panel();
         lblTurn = new Label();
 
+        pnlDeployment = new Panel();
+        lblDeploymentTitle = new Label();
+        lblDeploymentInfo = new Label();
+        btnEndDeployment = new Button();
+        btnUndoDeployment = new Button();
+
         lblLogTitle = new Label();
         lstMoveLog = new ListBox();
         lblChatTitle = new Label();
@@ -82,6 +95,7 @@ partial class GamePlayForm
         pnlOpponent.SuspendLayout();
         pnlPlayer.SuspendLayout();
         pnlTurn.SuspendLayout();
+        pnlDeployment.SuspendLayout();
         pnlRight.SuspendLayout();
         SuspendLayout();
 
@@ -93,6 +107,7 @@ partial class GamePlayForm
         pnlLeft.BackColor = Color.FromArgb(235, 240, 245);
         pnlLeft.Padding = new Padding(8);
         pnlLeft.AutoScroll = true;
+        pnlLeft.Controls.Add(pnlDeployment);
         pnlLeft.Controls.Add(pnlTurn);
         pnlLeft.Controls.Add(pnlOpponent);
         pnlLeft.Controls.Add(pnlPlayer);
@@ -137,6 +152,48 @@ partial class GamePlayForm
         lblTurn.ForeColor = Color.FromArgb(192, 57, 43);
         lblTurn.TextAlign = ContentAlignment.MiddleCenter;
         lblTurn.Dock = DockStyle.Fill;
+
+        // pnlDeployment (Nước đi dàn trận)
+        pnlDeployment.Dock = DockStyle.Top;
+        pnlDeployment.Height = 148;
+        pnlDeployment.BackColor = Color.White;
+        pnlDeployment.BorderStyle = BorderStyle.FixedSingle;
+        pnlDeployment.Visible = false;
+        pnlDeployment.Controls.Add(btnUndoDeployment);
+        pnlDeployment.Controls.Add(btnEndDeployment);
+        pnlDeployment.Controls.Add(lblDeploymentInfo);
+        pnlDeployment.Controls.Add(lblDeploymentTitle);
+        pnlDeployment.SendToBack();
+
+        lblDeploymentTitle.Text = "NƯỚC ĐI DÀN TRẬN";
+        lblDeploymentTitle.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+        lblDeploymentTitle.ForeColor = Color.FromArgb(39, 174, 96);
+        lblDeploymentTitle.Location = new Point(8, 6);
+        lblDeploymentTitle.AutoSize = true;
+
+        lblDeploymentInfo.Text = "Các quân còn lại trong cụm có thể đi:";
+        lblDeploymentInfo.Font = new Font("Segoe UI", 8F, FontStyle.Regular);
+        lblDeploymentInfo.ForeColor = Color.FromArgb(44, 62, 80);
+        lblDeploymentInfo.Location = new Point(8, 28);
+        lblDeploymentInfo.Size = new Size(230, 36);
+
+        btnEndDeployment.Text = "Kết thúc dàn trận";
+        btnEndDeployment.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
+        btnEndDeployment.BackColor = Color.FromArgb(39, 174, 96);
+        btnEndDeployment.ForeColor = Color.White;
+        btnEndDeployment.FlatStyle = FlatStyle.Flat;
+        btnEndDeployment.Location = new Point(8, 68);
+        btnEndDeployment.Size = new Size(230, 32);
+        btnEndDeployment.Cursor = Cursors.Hand;
+
+        btnUndoDeployment.Text = "Hoàn tác nước dàn trận";
+        btnUndoDeployment.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
+        btnUndoDeployment.BackColor = Color.FromArgb(230, 126, 34);
+        btnUndoDeployment.ForeColor = Color.White;
+        btnUndoDeployment.FlatStyle = FlatStyle.Flat;
+        btnUndoDeployment.Location = new Point(8, 106);
+        btnUndoDeployment.Size = new Size(230, 32);
+        btnUndoDeployment.Cursor = Cursors.Hand;
 
         // pnlPlayer
         pnlPlayer.Dock = DockStyle.Bottom;
@@ -264,6 +321,8 @@ partial class GamePlayForm
         pnlPlayer.ResumeLayout(false);
         pnlPlayer.PerformLayout();
         pnlTurn.ResumeLayout(false);
+        pnlDeployment.ResumeLayout(false);
+        pnlDeployment.PerformLayout();
         pnlRight.ResumeLayout(false);
         pnlRight.PerformLayout();
         ResumeLayout(false);
