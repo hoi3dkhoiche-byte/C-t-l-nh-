@@ -37,6 +37,7 @@ services:
       RECONNECT_TIMEOUT: ${RECONNECT_TIMEOUT:-50}
       JOIN_REQUEST_TIMEOUT: ${JOIN_REQUEST_TIMEOUT:-20}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
+      GUNICORN_CMD_ARGS: ${GUNICORN_CMD_ARGS:---access-logfile -}
     ports:
       - "${PORT:-5000}:5000"
     healthcheck:
