@@ -200,6 +200,17 @@ public partial class RoomForm : BaseForm
             _myColor = ev.YourColor;
             _redUserId = ev.Players.Red;
             _blueUserId = ev.Players.Blue;
+            _room.HostUserId = _redUserId ?? _room.HostUserId;
+            _room.GuestUserId = _blueUserId;
+
+            if (!string.IsNullOrWhiteSpace(ev.PlayerNames?.Red) && _redUserId.HasValue)
+            {
+                GameApiService.Instance.CacheUser(_redUserId.Value, ev.PlayerNames.Red);
+            }
+            if (!string.IsNullOrWhiteSpace(ev.PlayerNames?.Blue) && _blueUserId.HasValue)
+            {
+                GameApiService.Instance.CacheUser(_blueUserId.Value, ev.PlayerNames.Blue);
+            }
 
             await RefreshPlayerNamesAsync();
 
@@ -216,8 +227,10 @@ public partial class RoomForm : BaseForm
                     myColor: _myColor,
                     initialBoard: ev.Game.Board,
                     initialTurn: ev.Game.Turn,
-                    turnSeconds: 45,
-                    initialMoveCount: ev.Game.MoveCount + 1
+                    turnSeconds: ev.Game.TurnSeconds,
+                    initialMoveCount: ev.Game.MoveCount + 1,
+                    initialTurnRemainingSeconds: ev.Game.TurnRemainingSeconds,
+                    initialRevision: ev.Game.Revision
                 );
                 gameForm.Show();
                 this.FormClosed -= RoomForm_FormClosed;
@@ -226,6 +239,25 @@ public partial class RoomForm : BaseForm
             }
 
             ResetReadyStatesUi();
+            var myId = SessionService.Instance.CurrentUser?.Id;
+            foreach (int readyId in ev.ReadyUserIds)
+            {
+                if (_redUserId == readyId)
+                {
+                    lblHostStatus.Text = "Trạng thái: ĐÃ SẴN SÀNG ✅";
+                    lblHostStatus.ForeColor = Color.FromArgb(39, 174, 96);
+                }
+                else if (_blueUserId == readyId)
+                {
+                    lblGuestStatus.Text = "Trạng thái: ĐÃ SẴN SÀNG ✅";
+                    lblGuestStatus.ForeColor = Color.FromArgb(39, 174, 96);
+                }
+                if (myId.HasValue && readyId == myId.Value)
+                {
+                    _hasSentReady = true;
+                }
+            }
+            UpdateReadyButtonState();
         });
     }
 
@@ -233,13 +265,25 @@ public partial class RoomForm : BaseForm
     {
         RunOnUi(async () =>
         {
-            if (ev.Color == "blue") _blueUserId = ev.UserId;
-            else if (ev.Color == "red") _redUserId = ev.UserId;
+            if (!string.IsNullOrWhiteSpace(ev.Username))
+            {
+                GameApiService.Instance.CacheUser(ev.UserId, ev.Username);
+            }
+            if (ev.Color == "blue")
+            {
+                _blueUserId = ev.UserId;
+                _room.GuestUserId = ev.UserId;
+            }
+            else if (ev.Color == "red")
+            {
+                _redUserId = ev.UserId;
+                _room.HostUserId = ev.UserId;
+            }
 
             await RefreshPlayerNamesAsync();
             ResetReadyStatesUi();
 
-            string joinedName = GameApiService.Instance.ResolveCachedUsername(ev.UserId);
+            string joinedName = ev.Username ?? GameApiService.Instance.ResolveCachedUsername(ev.UserId);
             AddChatLine($"[Hệ thống] ⚔️ {joinedName} đã vào phòng! Cả hai hãy bấm SẴN SÀNG.");
         });
     }
@@ -353,7 +397,10 @@ public partial class RoomForm : BaseForm
                 myColor: _myColor,
                 initialBoard: ev.Board,
                 initialTurn: ev.FirstTurn,
-                turnSeconds: ev.TurnSeconds
+                turnSeconds: ev.TurnSeconds,
+                initialMoveCount: 1,
+                initialTurnRemainingSeconds: ev.TurnSeconds,
+                initialRevision: ev.Revision
             );
             gameForm.Show();
             this.FormClosed -= RoomForm_FormClosed;

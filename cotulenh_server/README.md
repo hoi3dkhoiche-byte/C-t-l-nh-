@@ -7,7 +7,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 cp .env.example .env            # Mặc định cấu hình sẵn SQLite local hợp lệ
 flask --app main db upgrade     # Nâng DB lên migration mới nhất (bắt buộc trước khi chạy)
-python main.py                  # Chạy tại http://127.0.0.1:5000
+python main.py                  # Chạy tại http://0.0.0.0:5000 (hỗ trợ hai máy cùng mạng LAN)
 ```
 
 ## 2. Chạy Local bằng Docker Compose (Server + MySQL 8.4 nội bộ)

@@ -308,7 +308,8 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options
 db.init_app(app)
 migrate = Migrate(app, db)
 app.register_blueprint(reset_bp)
-socketio = SocketIO(app, async_mode="threading")
+# Giữ đúng thứ tự xử lý các sự kiện join_room / player_ready / leave_room của từng client
+socketio = SocketIO(app, async_mode="threading", async_handlers=False)
 
 
 @app.get("/health")  # Trạng thái server
@@ -371,6 +372,8 @@ def create_room():
             "id": room.id,
             "room_code": room.room_code,
             "host_user_id": room.host_user_id,
+            "host_username": user.username,
+            "bet_amount": 0,
             "status": room.status,
         },
     }), 201
@@ -383,19 +386,22 @@ def list_rooms():
         Room.created_at.desc()
     ).all()
 
-    return jsonify({
-        "rooms": [
-            {
-                "id": room.id,
-                "room_code": room.room_code,
-                "host_user_id": room.host_user_id,
-                "host_reputation": db.session.get(User, room.host_user_id).reputation,
-                "status": room.status,
-                "created_at": room.created_at.isoformat(),
-            }
-            for room in rooms
-        ]
-    }), 200
+    result = []
+    for room in rooms:
+        host = db.session.get(User, room.host_user_id)
+        result.append({
+            "id": room.id,
+            "room_code": room.room_code,
+            "host_user_id": room.host_user_id,
+            "host_username": host.username if host else "Chủ phòng",
+            "guest_user_id": active_rooms.get(room.room_code, {}).get("blue"),
+            "bet_amount": 0,
+            "host_reputation": host.reputation if host else MAX_REPUTATION,
+            "status": room.status,
+            "created_at": room.created_at.isoformat(),
+        })
+
+    return jsonify({"rooms": result}), 200
 
 
 
@@ -710,17 +716,17 @@ def handle_connect(auth=None):
     token = auth.get("token") if isinstance(auth, dict) else None
 
     if not token:
-        print(f"[SocketIO] Khách kết nối: {request.sid}")
+        app.logger.info("Socket.IO guest connected: %s", request.sid)
         return
 
     try:
         decoded = decode_token(token)
     except Exception:
-        print(f"[SocketIO] Từ chối, token không hợp lệ: {request.sid}")
+        app.logger.info("Socket.IO invalid token: %s", request.sid)
         return False
 
     connected_users[request.sid] = int(decoded["sub"])
-    print(f"[SocketIO] User {decoded['sub']} kết nối: {request.sid}")
+    app.logger.info("Socket.IO user %s connected: %s", decoded["sub"], request.sid)
 
 
 @socketio.on("disconnect")
@@ -729,7 +735,7 @@ def handle_disconnect(reason=None):
     cancel_pending_join(request.sid)
     if not hold_seat(request.sid, user_id):
         remove_from_room(request.sid, user_id)
-    print(f"[SocketIO] Ngắt kết nối: {request.sid} (user {user_id})")
+    app.logger.info("Socket.IO disconnected: %s (user %s)", request.sid, user_id)
 
 
 active_rooms = {}  
@@ -817,12 +823,35 @@ user_rooms = {}
 
 room_states = {}  # mã (trạng thái: waiting, ready, playing và danh sách người chơi đã sẵn sàng)
 
+TURN_SECONDS = int(os.getenv("TURN_SECONDS", "45"))
 RECONNECT_TIMEOUT = int(os.getenv("RECONNECT_TIMEOUT", "50"))
 LOW_REPUTATION = 6
 JOIN_REQUEST_TIMEOUT = int(os.getenv("JOIN_REQUEST_TIMEOUT", "20"))
 JOIN_COOLDOWN = 60
 pending_joins = {}   # room_code -> yêu cầu vào phòng đang chờ chủ phòng duyệt
 join_cooldowns = {}  # (room_code, user_id) -> thời điểm được xin vào lại
+
+
+def game_snapshot(state):
+    if not state or state.get("status") != "playing":
+        return None
+    remaining = max(0, state.get("turn_deadline", time.monotonic() + TURN_SECONDS) - time.monotonic())
+    return {
+        "turn": state["turn"],
+        "move_count": len(state["moves"]),
+        "revision": state.get("revision", 0),
+        "board": [asdict(p) for p in state["pieces"]],
+        "turn_seconds": TURN_SECONDS,
+        "turn_remaining_seconds": min(TURN_SECONDS, int(remaining + 0.999)),
+    }
+
+
+def player_names(players):
+    names = {}
+    for color, uid in players.items():
+        u = db.session.get(User, uid) if uid is not None else None
+        names[color] = u.username if u is not None else None
+    return names
 
 
 @socketio.on("join_room")
@@ -846,7 +875,7 @@ def handle_join_room(data):
         emit("error", {"code": "ALREADY_IN_ROOM", "message": "Bạn đang ở phòng khác"})
         return
     room = Room.query.filter_by(room_code=room_code).first()
-    if room is None:
+    if room is None or room.status == "closed":
         emit("error", {"code": "ROOM_NOT_FOUND", "message": "Phòng không tồn tại"})
         return
 
@@ -873,13 +902,8 @@ def handle_join_room(data):
         snapshot = dict(players)
         state = room_states.get(room_code)
         reconnected = bool(state) and state.get("waiting_reconnect", {}).pop(user_id, None) is not None
-        game = None
-        if state and state.get("status") == "playing":
-            game = {
-                "turn": state["turn"],
-                "move_count": len(state["moves"]),
-                "board": [asdict(p) for p in state["pieces"]],
-            }
+        game = game_snapshot(state)
+        ready_users = list(state.get("ready", ())) if state else []
 
     if color is None:
         emit("error", {"code": "ROOM_FULL", "message": "Phòng đã đủ người"})
@@ -905,13 +929,23 @@ def handle_join_room(data):
 
     join_room(room_code)
     user_rooms[request.sid] = room_code
-    emit("room_joined", {"room_code": room_code, "players": snapshot, "your_color": color, "game":game},)
+    emit(
+        "room_joined",
+        {
+            "room_code": room_code,
+            "players": snapshot,
+            "your_color": color,
+            "player_names": player_names(snapshot),
+            "ready_user_ids": ready_users,
+            "game": game,
+        },
+    )
     if reconnected:
         emit("player_reconnected", {"user_id": user_id}, to=room_code, include_self=False)
     else:
         emit(
             "player_joined",
-            {"user_id": user_id, "color": color},
+            {"user_id": user_id, "color": color, "username": user.username},
             to=room_code,
             include_self=False,
         )
@@ -949,6 +983,7 @@ def handle_answer_join(data=None):
     accept = (data or {}).get("accept") is True
 
     pending = None
+    ready_users = []
     with rooms_lock:
         players = active_rooms.get(room_code)
         if players and players["red"] == user_id and room_code in pending_joins:
@@ -956,6 +991,8 @@ def handle_answer_join(data=None):
             if accept:
                 players["blue"] = pending["user_id"]
                 snapshot = dict(players)
+                state = room_states.get(room_code)
+                ready_users = list(state.get("ready", ())) if state else []
             else:
                 join_cooldowns[(room_code, pending["user_id"])] = time.monotonic() + JOIN_COOLDOWN
 
@@ -973,12 +1010,27 @@ def handle_answer_join(data=None):
 
     join_room(room_code, sid=pending["sid"])
     user_rooms[pending["sid"]] = room_code
+    guest_user = db.session.get(User, pending["user_id"])
     socketio.emit(
         "room_joined",
-        {"room_code": room_code, "players": snapshot, "your_color": "blue", "game": None},
+        {
+            "room_code": room_code,
+            "players": snapshot,
+            "your_color": "blue",
+            "player_names": player_names(snapshot),
+            "ready_user_ids": ready_users,
+            "game": None,
+        },
         to=pending["sid"],
     )
-    emit("player_joined", {"user_id": pending["user_id"], "color": "blue"})
+    emit(
+        "player_joined",
+        {
+            "user_id": pending["user_id"],
+            "color": "blue",
+            "username": guest_user.username if guest_user else "Đối thủ",
+        },
+    )
 
 def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="opponent_left"):
     if sid is not None:
@@ -1006,9 +1058,12 @@ def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="oppone
             others = []
 
     if was_playing and forfeit:
+        room = Room.query.filter_by(room_code=room_code).first()
+        if room is not None:
+            room.status = "closed" if closed else "waiting"
         result = "blue_win" if user_id == snapshot["red"] else "red_win"
         delta_red, delta_blue = record_match(
-        room_code, snapshot["red"], snapshot["blue"], result, abandoned=True
+            room_code, snapshot["red"], snapshot["blue"], result, abandoned=True
         )
         socketio.emit(
             "game_over",
@@ -1020,6 +1075,11 @@ def remove_from_room(sid, user_id, forfeit=False, room_code=None, reason="oppone
             },
             to=room_code,
         )
+    else:
+        room = Room.query.filter_by(room_code=room_code).first()
+        if room is not None:
+            room.status = "closed" if closed else "waiting"
+            db.session.commit()
 
     if sid is not None:
         leave_room(room_code, sid=sid)
@@ -1071,6 +1131,7 @@ def forfeit_after_timeout(room_code, user_id, token):
 @socketio.on("leave_room")
 def handle_leave_room(data=None):
     user_id = connected_users.get(request.sid)
+    cancel_pending_join(request.sid)
     room_code = remove_from_room(request.sid, user_id, forfeit=True)
     emit("room_left", {"room_code": room_code})
 
@@ -1099,27 +1160,33 @@ def handle_player_ready(data=None):
             state["status"] = "playing"
             state["turn"] = "red"
             state["moves"] = []
+            state["revision"] = 0
             state["pieces"] = game_engine.initial_pieces()
             board = [asdict(p) for p in state["pieces"]]
             turn_token = state["turn_token"] = object()
+            state["turn_deadline"] = time.monotonic() + TURN_SECONDS
         snapshot = dict(players)
 
     emit("player_ready", {"user_id": user_id}, to=room_code)
     if started:
+        room = Room.query.filter_by(room_code=room_code).first()
+        if room is not None:
+            room.status = "playing"
+            db.session.commit()
         emit(
             "game_started",
             {
                 "room_code": room_code,
                 "players": snapshot,
                 "first_turn": "red",
+                "revision": 0,
                 "turn_seconds": TURN_SECONDS,
                 "board": board,
+                "player_names": player_names(snapshot),
             },
             to=room_code,
         )
         socketio.start_background_task(turn_timeout, room_code, turn_token)
-
-TURN_SECONDS = int(os.getenv("TURN_SECONDS", "45"))
 
 
 def turn_timeout(room_code, token):
@@ -1130,14 +1197,20 @@ def turn_timeout(room_code, token):
             return
         skipped = state["turn"]
         state["turn"] = game_engine.other_side(skipped)
+        state["revision"] += 1
         new_token = state["turn_token"] = object()
         next_turn = state["turn"]
+        state["turn_deadline"] = time.monotonic() + TURN_SECONDS
+        game = game_snapshot(state)
 
-    socketio.emit("turn_timeout", {"skipped": skipped, "next_turn": next_turn}, to=room_code)
+    socketio.emit("turn_timeout", {"skipped": skipped, "next_turn": next_turn, "game": game}, to=room_code)
     socketio.start_background_task(turn_timeout, room_code, new_token)
 
 def finish_game(room_code, players, winner, reason):
     result = "red_win" if winner == "red" else "blue_win"
+    room = Room.query.filter_by(room_code=room_code).first()
+    if room is not None:
+        room.status = "waiting"
     delta_red, delta_blue = record_match(room_code, players["red"], players["blue"], result)
     socketio.emit(
         "game_over",
@@ -1190,6 +1263,7 @@ def handle_make_move(data=None):
                 )
         if not error:
             state["turn"] = game_engine.other_side(color)
+            state["revision"] += 1
             move["no"] = len(state["moves"]) + 1
             move["by"] = color
             state["moves"].append(move)
@@ -1198,14 +1272,16 @@ def handle_make_move(data=None):
                 room_states.pop(room_code, None)
             else:
                 turn_token = state["turn_token"] = object()
+                state["turn_deadline"] = time.monotonic() + TURN_SECONDS
             snapshot = dict(players)
             next_turn = None if winner else state["turn"]
+            game = game_snapshot(state)
 
     if error:
         emit("move_rejected", {"reason": error})
         return
 
-    emit("move_made", {"move": move, "next_turn": next_turn}, to=room_code)
+    emit("move_made", {"move": move, "next_turn": next_turn, "game": game}, to=room_code)
     if winner:
         finish_game(room_code, snapshot, winner, reason)
     else:
@@ -1267,7 +1343,29 @@ def handle_chat(data=None):
     )
 
 
+def close_orphaned_rooms():
+    """Đóng các phòng cũ từ phiên chạy trước khi server khởi động lại (vì active_rooms nằm trên RAM)."""
+    try:
+        with app.app_context():
+            stale = Room.query.filter(Room.status.in_(("waiting", "playing"))).all()
+            if stale:
+                for room in stale:
+                    room.status = "closed"
+                db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+
+
 if __name__ == "__main__":
-    host = os.getenv("HOST", "127.0.0.1")
+    close_orphaned_rooms()
+    host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "5000"))
-    socketio.run(app, host=host, port=port, debug=not IS_PRODUCTION)
+    debug = os.getenv("FLASK_DEBUG") == "1" and not IS_PRODUCTION
+    socketio.run(
+        app,
+        host=host,
+        port=port,
+        debug=debug,
+        use_reloader=False,
+        allow_unsafe_werkzeug=not IS_PRODUCTION,
+    )

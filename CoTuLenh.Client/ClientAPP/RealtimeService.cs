@@ -16,6 +16,15 @@ public class ServerPlayersDto
     public int? Blue { get; set; }
 }
 
+public class ServerPlayerNamesDto
+{
+    [JsonPropertyName("red")]
+    public string? Red { get; set; }
+
+    [JsonPropertyName("blue")]
+    public string? Blue { get; set; }
+}
+
 public class ServerPieceDto
 {
     [JsonPropertyName("piece_id")]
@@ -51,6 +60,15 @@ public class ResyncGameDto
     [JsonPropertyName("move_count")]
     public int MoveCount { get; set; }
 
+    [JsonPropertyName("revision")]
+    public long Revision { get; set; }
+
+    [JsonPropertyName("turn_seconds")]
+    public int TurnSeconds { get; set; } = 45;
+
+    [JsonPropertyName("turn_remaining_seconds")]
+    public int TurnRemainingSeconds { get; set; } = 45;
+
     [JsonPropertyName("board")]
     public List<ServerPieceDto> Board { get; set; } = new();
 }
@@ -66,6 +84,12 @@ public class RoomJoinedEvent
     [JsonPropertyName("your_color")]
     public string YourColor { get; set; } = "red";
 
+    [JsonPropertyName("player_names")]
+    public ServerPlayerNamesDto? PlayerNames { get; set; }
+
+    [JsonPropertyName("ready_user_ids")]
+    public List<int> ReadyUserIds { get; set; } = new();
+
     [JsonPropertyName("game")]
     public ResyncGameDto? Game { get; set; }
 }
@@ -77,6 +101,9 @@ public class PlayerJoinedEvent
 
     [JsonPropertyName("color")]
     public string Color { get; set; } = "blue";
+
+    [JsonPropertyName("username")]
+    public string? Username { get; set; }
 }
 
 public class PlayerLeftEvent
@@ -129,8 +156,14 @@ public class GameStartedEvent
     [JsonPropertyName("first_turn")]
     public string FirstTurn { get; set; } = "red";
 
+    [JsonPropertyName("revision")]
+    public long Revision { get; set; }
+
     [JsonPropertyName("turn_seconds")]
     public int TurnSeconds { get; set; } = 45;
+
+    [JsonPropertyName("player_names")]
+    public ServerPlayerNamesDto? PlayerNames { get; set; }
 
     [JsonPropertyName("board")]
     public List<ServerPieceDto> Board { get; set; } = new();
@@ -173,6 +206,9 @@ public class MoveMadeEvent
 
     [JsonPropertyName("next_turn")]
     public string? NextTurn { get; set; }
+
+    [JsonPropertyName("game")]
+    public ResyncGameDto? Game { get; set; }
 }
 
 public class MoveRejectedEvent
@@ -188,6 +224,9 @@ public class TurnTimeoutEvent
 
     [JsonPropertyName("next_turn")]
     public string NextTurn { get; set; } = "";
+
+    [JsonPropertyName("game")]
+    public ResyncGameDto? Game { get; set; }
 }
 
 public class OpponentDisconnectedEvent
@@ -246,6 +285,9 @@ public sealed class RealtimeService
     private string? _connectedBaseUrl;
     private string? _connectedToken;
     private readonly SemaphoreSlim _connectLock = new(1, 1);
+    private readonly object _stateGate = new();
+    private JsonElement? _currentGame;
+    private string? _lastConnectionError;
 
     private static readonly JsonSerializerOptions jsonOptions = new()
     {
@@ -258,14 +300,23 @@ public sealed class RealtimeService
     /// Mã phòng hiện tại đang tham gia (dùng để tự động vào lại và khôi phục bàn cờ nếu rớt mạng tạm thời).
     /// </summary>
     public string? ActiveRoomCode { get; set; }
+    public string? CurrentRoomCode => ActiveRoomCode;
+    public string? YourColor { get; private set; }
+
+    public JsonElement? CurrentGame
+    {
+        get { lock (_stateGate) return _currentGame; }
+        private set { lock (_stateGate) _currentGame = value; }
+    }
 
     // Sự kiện chung & Bảng xếp hạng
     public event Action<List<UserModel>>? OnLeaderboardUpdated;
     public event Action? OnConnected;
     public event Action? OnDisconnected;
     public event Action<SocketErrorEvent>? OnSocketError;
+    public event Action<string, JsonElement>? OnGameEvent;
 
-    // Sự kiện Chat trong phòng / trong trận (từ nhánh match-chat)
+    // Sự kiện Chat trong phòng / trong trận
     public event Action<ChatMessageModel>? OnChatMessage;
     public event Action<string>? OnChatRejected;
     public event Action<string>? OnRoomNotice;
@@ -291,6 +342,15 @@ public sealed class RealtimeService
 
     private RealtimeService() { }
 
+    public Task<bool> ConnectAsync(string serverUrl)
+    {
+        if (!string.IsNullOrWhiteSpace(serverUrl))
+        {
+            ServerConfig.TrySetBaseUrl(serverUrl, out _);
+        }
+        return ConnectAsync(forceReconnect: false);
+    }
+
     public async Task<bool> ConnectAsync(bool forceReconnect = false)
     {
         string targetUrl = ServerConfig.BaseUrl;
@@ -311,6 +371,7 @@ public sealed class RealtimeService
 
             if (_socket != null)
             {
+                ClearRoomState();
                 try
                 {
                     if (_socket.Connected)
@@ -329,7 +390,6 @@ public sealed class RealtimeService
                 ReconnectionAttempts = 15,
                 ReconnectionDelayMax = 4000,
                 ConnectionTimeout = TimeSpan.FromSeconds(8),
-                // Gửi JWT để server xác thực người dùng
                 Auth = string.IsNullOrWhiteSpace(token)
                     ? null
                     : new Dictionary<string, string> { ["token"] = token },
@@ -337,17 +397,26 @@ public sealed class RealtimeService
                 Transport = TransportProtocol.WebSocket
             };
 
-            _socket = new SocketIO(new Uri(targetUrl), options);
+            var socket = new SocketIO(new Uri(targetUrl), options);
+            _socket = socket;
             _connectedBaseUrl = targetUrl;
             _connectedToken = token;
+            _lastConnectionError = null;
 
-            RegisterEventHandlers(_socket);
+            RegisterEventHandlers(socket);
 
-            await _socket.ConnectAsync();
-            return _socket.Connected;
+            await socket.ConnectAsync();
+            return socket.Connected;
         }
-        catch
+        catch (Exception ex)
         {
+            _lastConnectionError = ex.Message;
+            var errPayload = JsonSerializer.SerializeToElement(new
+            {
+                code = "CONNECTION_FAILED",
+                message = "Không thể kết nối máy chủ: " + ex.Message
+            });
+            OnGameEvent?.Invoke("error", errPayload);
             return false;
         }
         finally
@@ -356,13 +425,69 @@ public sealed class RealtimeService
         }
     }
 
+    private void ClearRoomState()
+    {
+        ActiveRoomCode = null;
+        YourColor = null;
+        CurrentGame = null;
+    }
+
+    private void UpdateCachedGameFromPayload(string eventName, JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return;
+
+        if (eventName == "room_joined")
+        {
+            if (payload.TryGetProperty("room_code", out var rc)) ActiveRoomCode = rc.GetString();
+            if (payload.TryGetProperty("your_color", out var yc)) YourColor = yc.GetString();
+            CurrentGame = payload.TryGetProperty("game", out var g) && g.ValueKind == JsonValueKind.Object
+                ? g.Clone()
+                : null;
+        }
+        else if (eventName == "game_started")
+        {
+            if (payload.TryGetProperty("room_code", out var rc)) ActiveRoomCode = rc.GetString();
+            CurrentGame = payload.Clone();
+        }
+        else if (eventName == "room_left" ||
+                 (eventName == "player_left" &&
+                  payload.TryGetProperty("room_closed", out var closed) &&
+                  closed.ValueKind == JsonValueKind.True))
+        {
+            ClearRoomState();
+        }
+        else if (payload.TryGetProperty("game", out var game) && game.ValueKind == JsonValueKind.Object)
+        {
+            lock (_stateGate)
+            {
+                bool stale = _currentGame is JsonElement current &&
+                             current.TryGetProperty("revision", out var oldRev) &&
+                             game.TryGetProperty("revision", out var newRev) &&
+                             newRev.GetInt64() < oldRev.GetInt64();
+                if (!stale) _currentGame = game.Clone();
+            }
+        }
+    }
+
+    private void EmitRawGameEvent(string eventName, IEventContext ctx)
+    {
+        var elem = TryGetJsonElement(ctx);
+        if (elem.HasValue)
+        {
+            var cloned = elem.Value.Clone();
+            UpdateCachedGameFromPayload(eventName, cloned);
+            OnGameEvent?.Invoke(eventName, cloned);
+        }
+    }
+
     private void RegisterEventHandlers(SocketIO socket)
     {
         socket.OnConnected += async (sender, e) =>
         {
+            if (!ReferenceEquals(_socket, socket)) return;
+            _lastConnectionError = null;
             OnConnected?.Invoke();
 
-            // Tự động vào lại phòng để Server resync bàn cờ nếu mất mạng tạm thời giữa ván
             string? roomToRejoin = ActiveRoomCode;
             if (!string.IsNullOrWhiteSpace(roomToRejoin))
             {
@@ -376,12 +501,14 @@ public sealed class RealtimeService
 
         socket.OnDisconnected += (sender, e) =>
         {
+            if (!ReferenceEquals(_socket, socket)) return;
             OnDisconnected?.Invoke();
         };
 
         // --- CHAT EVENTS ---
         socket.On("chat_message", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
             var msg = TryGetPayload<ChatMessageModel>(ctx);
             if (msg != null)
             {
@@ -393,6 +520,7 @@ public sealed class RealtimeService
 
         socket.On("chat_rejected", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
             string reason = ReadString(ctx, "reason");
             OnChatRejected?.Invoke(reason switch
             {
@@ -408,6 +536,8 @@ public sealed class RealtimeService
         // --- ROOM & GAMEPLAY EVENTS ---
         socket.On("error", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("error", ctx);
             var err = TryGetPayload<SocketErrorEvent>(ctx);
             if (err != null)
             {
@@ -422,10 +552,18 @@ public sealed class RealtimeService
 
         socket.On("room_joined", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("room_joined", ctx);
             var ev = TryGetPayload<RoomJoinedEvent>(ctx);
             if (ev != null)
             {
                 ActiveRoomCode = ev.RoomCode;
+                YourColor = ev.YourColor;
+                if (ev.Players.Red.HasValue && !string.IsNullOrWhiteSpace(ev.PlayerNames?.Red))
+                    GameApiService.Instance.CacheUser(ev.Players.Red.Value, ev.PlayerNames.Red);
+                if (ev.Players.Blue.HasValue && !string.IsNullOrWhiteSpace(ev.PlayerNames?.Blue))
+                    GameApiService.Instance.CacheUser(ev.Players.Blue.Value, ev.PlayerNames.Blue);
+
                 OnRoomJoined?.Invoke(ev);
                 string colorVi = ev.YourColor == "red" ? "Đỏ" : "Xanh";
                 OnRoomNotice?.Invoke($"Đã kết nối phòng {ev.RoomCode}, bạn cầm phe {colorVi}");
@@ -435,9 +573,13 @@ public sealed class RealtimeService
 
         socket.On("player_joined", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("player_joined", ctx);
             var ev = TryGetPayload<PlayerJoinedEvent>(ctx);
             if (ev != null)
             {
+                if (!string.IsNullOrWhiteSpace(ev.Username))
+                    GameApiService.Instance.CacheUser(ev.UserId, ev.Username);
                 OnPlayerJoined?.Invoke(ev);
                 OnRoomNotice?.Invoke("Đối thủ đã vào phòng");
             }
@@ -446,10 +588,12 @@ public sealed class RealtimeService
 
         socket.On("player_left", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("player_left", ctx);
             var ev = TryGetPayload<PlayerLeftEvent>(ctx);
             if (ev != null)
             {
-                if (ev.RoomClosed) ActiveRoomCode = null;
+                if (ev.RoomClosed) ClearRoomState();
                 OnPlayerLeft?.Invoke(ev);
                 OnRoomNotice?.Invoke("Đối thủ đã rời phòng");
             }
@@ -458,6 +602,8 @@ public sealed class RealtimeService
 
         socket.On("join_pending", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("join_pending", ctx);
             var ev = TryGetPayload<JoinPendingEvent>(ctx);
             if (ev != null)
             {
@@ -469,6 +615,8 @@ public sealed class RealtimeService
 
         socket.On("join_request", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("join_request", ctx);
             var ev = TryGetPayload<JoinRequestEvent>(ctx);
             if (ev != null)
             {
@@ -480,6 +628,8 @@ public sealed class RealtimeService
 
         socket.On("join_request_expired", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("join_request_expired", ctx);
             var ev = TryGetPayload<UserIdEvent>(ctx);
             if (ev != null) OnJoinRequestExpired?.Invoke(ev);
             return Task.CompletedTask;
@@ -487,6 +637,8 @@ public sealed class RealtimeService
 
         socket.On("join_request_cancelled", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("join_request_cancelled", ctx);
             var ev = TryGetPayload<UserIdEvent>(ctx);
             if (ev != null) OnJoinRequestCancelled?.Invoke(ev);
             return Task.CompletedTask;
@@ -494,6 +646,8 @@ public sealed class RealtimeService
 
         socket.On("player_ready", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("player_ready", ctx);
             var ev = TryGetPayload<UserIdEvent>(ctx);
             if (ev != null) OnPlayerReady?.Invoke(ev);
             return Task.CompletedTask;
@@ -501,10 +655,16 @@ public sealed class RealtimeService
 
         socket.On("game_started", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("game_started", ctx);
             var ev = TryGetPayload<GameStartedEvent>(ctx);
             if (ev != null)
             {
                 ActiveRoomCode = ev.RoomCode;
+                if (ev.Players.Red.HasValue && !string.IsNullOrWhiteSpace(ev.PlayerNames?.Red))
+                    GameApiService.Instance.CacheUser(ev.Players.Red.Value, ev.PlayerNames.Red);
+                if (ev.Players.Blue.HasValue && !string.IsNullOrWhiteSpace(ev.PlayerNames?.Blue))
+                    GameApiService.Instance.CacheUser(ev.Players.Blue.Value, ev.PlayerNames.Blue);
                 OnGameStarted?.Invoke(ev);
             }
             return Task.CompletedTask;
@@ -512,6 +672,8 @@ public sealed class RealtimeService
 
         socket.On("move_made", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("move_made", ctx);
             var ev = TryGetPayload<MoveMadeEvent>(ctx);
             if (ev != null) OnMoveMade?.Invoke(ev);
             return Task.CompletedTask;
@@ -519,6 +681,8 @@ public sealed class RealtimeService
 
         socket.On("move_rejected", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("move_rejected", ctx);
             var ev = TryGetPayload<MoveRejectedEvent>(ctx);
             if (ev != null) OnMoveRejected?.Invoke(ev);
             return Task.CompletedTask;
@@ -526,6 +690,8 @@ public sealed class RealtimeService
 
         socket.On("turn_timeout", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("turn_timeout", ctx);
             var ev = TryGetPayload<TurnTimeoutEvent>(ctx);
             if (ev != null) OnTurnTimeout?.Invoke(ev);
             return Task.CompletedTask;
@@ -533,6 +699,8 @@ public sealed class RealtimeService
 
         socket.On("opponent_disconnected", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("opponent_disconnected", ctx);
             var ev = TryGetPayload<OpponentDisconnectedEvent>(ctx);
             if (ev != null) OnOpponentDisconnected?.Invoke(ev);
             return Task.CompletedTask;
@@ -540,6 +708,8 @@ public sealed class RealtimeService
 
         socket.On("player_reconnected", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("player_reconnected", ctx);
             var ev = TryGetPayload<UserIdEvent>(ctx);
             if (ev != null) OnPlayerReconnected?.Invoke(ev);
             return Task.CompletedTask;
@@ -547,23 +717,29 @@ public sealed class RealtimeService
 
         socket.On("game_over", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("game_over", ctx);
             var ev = TryGetPayload<GameOverEvent>(ctx);
             if (ev != null)
             {
                 ActiveRoomCode = null;
+                CurrentGame = null;
                 OnGameOver?.Invoke(ev);
             }
             return Task.CompletedTask;
         });
 
-        socket.On("room_left", _ =>
+        socket.On("room_left", ctx =>
         {
-            ActiveRoomCode = null;
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
+            EmitRawGameEvent("room_left", ctx);
+            ClearRoomState();
             return Task.CompletedTask;
         });
 
         socket.On("leaderboard_updated", ctx =>
         {
+            if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
             try
             {
                 var elem = TryGetJsonElement(ctx);
@@ -665,10 +841,13 @@ public sealed class RealtimeService
 
     public async Task<bool> JoinRoomAsync(string roomCode)
     {
+        if (string.IsNullOrWhiteSpace(roomCode))
+            throw new ArgumentException("Vui lòng nhập mã phòng.", nameof(roomCode));
+
         if (!await ConnectAsync()) return false;
         if (_socket == null || !_socket.Connected) return false;
 
-        await _socket.EmitAsync("join_room", [new { room_code = roomCode }]);
+        await _socket.EmitAsync("join_room", [new { room_code = roomCode.Trim() }]);
         return true;
     }
 
@@ -682,13 +861,23 @@ public sealed class RealtimeService
 
     public async Task SetPlayerReadyAsync()
     {
-        if (_socket != null && _socket.Connected)
-        {
-            await _socket.EmitAsync("player_ready", [new { }]);
-        }
+        if (_socket == null || !_socket.Connected)
+            throw new InvalidOperationException(_lastConnectionError ?? "Đã mất kết nối máy chủ. Vui lòng thử kết nối lại.");
+
+        await _socket.EmitAsync("player_ready", [new { }]);
     }
 
-    public async Task MakeMoveAsync(
+    public Task ReadyAsync() => SetPlayerReadyAsync();
+
+    public Task MakeMoveAsync(MoveRequest move)
+    {
+        if (_socket == null || !_socket.Connected)
+            throw new InvalidOperationException(_lastConnectionError ?? "Đã mất kết nối máy chủ. Vui lòng thử kết nối lại.");
+
+        return _socket.EmitAsync("make_move", [move]);
+    }
+
+    public Task MakeMoveAsync(
         string pieceId,
         int fromX,
         int fromY,
@@ -697,20 +886,16 @@ public sealed class RealtimeService
         CaptureMode captureMode,
         bool moveStack)
     {
-        if (_socket != null && _socket.Connected)
+        return MakeMoveAsync(new MoveRequest
         {
-            string modeStr = captureMode == CaptureMode.StandStill ? "stand" : "occupy";
-            await _socket.EmitAsync("make_move", [new
-            {
-                piece_id = pieceId,
-                from_x = fromX,
-                from_y = fromY,
-                to_x = toX,
-                to_y = toY,
-                capture_mode = modeStr,
-                move_stack = moveStack
-            }]);
-        }
+            PieceId = pieceId,
+            FromX = fromX,
+            FromY = fromY,
+            ToX = toX,
+            ToY = toY,
+            CaptureMode = captureMode == CaptureMode.StandStill ? "stand" : "occupy",
+            MoveStackTogether = moveStack
+        });
     }
 
     public async Task<bool> SendChatAsync(string message)
@@ -724,7 +909,7 @@ public sealed class RealtimeService
     public async Task LeaveRoomAsync(string? roomCode = null)
     {
         string? code = roomCode ?? ActiveRoomCode;
-        ActiveRoomCode = null;
+        ClearRoomState();
         if (_socket != null && _socket.Connected)
         {
             await _socket.EmitAsync("leave_room", [new { room_code = code }]);
@@ -741,10 +926,26 @@ public sealed class RealtimeService
 
     public async Task DisconnectAsync()
     {
-        ActiveRoomCode = null;
-        if (_socket != null && _socket.Connected)
+        await _connectLock.WaitAsync();
+        try
         {
-            await _socket.DisconnectAsync();
+            ClearRoomState();
+            if (_socket != null)
+            {
+                try
+                {
+                    if (_socket.Connected) await _socket.DisconnectAsync();
+                    _socket.Dispose();
+                }
+                catch { }
+                _socket = null;
+            }
+            _connectedBaseUrl = null;
+            _connectedToken = null;
+        }
+        finally
+        {
+            _connectLock.Release();
         }
     }
 }

@@ -262,6 +262,36 @@ dotnet run
 
 ---
 
+### 5. Chơi hai máy trong mạng LAN (Windows)
+
+Hai máy dùng chung Wi-Fi/LAN và **một server**. Trên máy chạy server, mở PowerShell tại thư mục gốc dự án:
+
+```powershell
+.\Start-LanServer.ps1
+```
+
+Server lắng nghe trên `0.0.0.0:5000`; dùng `ipconfig` để lấy IPv4 của Wi-Fi/Ethernet, ví dụ `192.168.1.85`. Kiểm tra trên máy thứ hai bằng trình duyệt: `http://192.168.1.85:5000/health` phải trả `{"status":"ok"}`. Nếu không truy cập được, cho phép Python/cổng TCP 5000 qua Windows Firewall trên mạng Private.
+
+Trên **cả hai máy**, bạn có thể nhập trực tiếp địa chỉ `http://192.168.1.85:5000` ngay tại ô **Máy chủ LAN** trên màn hình Đăng nhập, hoặc chạy bằng script:
+
+```powershell
+.\Start-LanClient.ps1 -ServerUrl http://192.168.1.85:5000
+```
+
+Đăng ký và đăng nhập **hai tài khoản khác nhau**. Máy thứ nhất tạo phòng rồi gửi mã phòng cho máy thứ hai. Máy thứ hai nhập mã hoặc làm mới danh sách và vào phòng. Cả hai bấm **Sẵn sàng**: chủ phòng cầm Đỏ, khách cầm Xanh; Đỏ đi trước, hỗ trợ chat thời gian thực ngay trong phòng và trong ván đấu. Nước đi, hết giờ và kết quả do server quyết định. Khi mất mạng, client tự thử kết nối lại và nhận thế cờ hiện tại trong thời gian giữ chỗ (mặc định 50 giây).
+
+Để chép client sang máy khác, chạy `dotnet publish CoTuLenh.Client/ClientAPP/ClientAPP.csproj -c Release`, rồi chép **toàn bộ** thư mục `CoTuLenh.Client/ClientAPP/bin/Release/net9.0-windows/publish`. Máy nhận cần .NET 9 Desktop Runtime.
+
+Kiểm thử tự động hai client với server và database tạm riêng:
+
+```powershell
+.\cotulenh_server\.venv\Scripts\python.exe -m unittest discover -s cotulenh_server/testcase -p test_lan_smoke.py -v
+dotnet restore CoTuLenh.Client/LanSmoke/LanSmoke.csproj
+.\cotulenh_server\.venv\Scripts\python.exe -m unittest discover -s cotulenh_server/testcase -p test_lan_client.py -v
+```
+
+---
+
 ## 📡 TÀI LIỆU API & SOCKET.IO EVENTS
 
 ### REST APIs chính:
@@ -287,7 +317,8 @@ dotnet run
   * `player_ready`: Báo trạng thái sẵn sàng bắt đầu trận.
   * `make_move`: Gửi nước đi (`{"piece_id": "...", "from_x": ..., "from_y": ..., "to_x": ..., "to_y": ...}`).
   * `leave_room`: Rời phòng (nếu đang trong ván chơi sẽ bị xử thua và phạt uy tín).
-  * `approve_join` / `reject_join`: Chủ phòng xét duyệt người chơi có uy tín thấp.
+  * `answer_join`: Chủ phòng xét duyệt người chơi có uy tín thấp (`{"accept": true}` hoặc `false`).
+  * `chat`: Gửi tin nhắn chat thời gian thực trong phòng chờ và trong ván đấu (`{"message": "..."}`).
 * **Server phát về Client:**
   * `room_joined`: Thông báo vào phòng thành công (kèm dữ liệu ván đấu nếu là kết nối lại giữa chừng).
   * `game_started`: Cả 2 đã sẵn sàng, phát bàn cờ ban đầu và khởi động đồng hồ.

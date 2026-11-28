@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -10,6 +10,10 @@
 
   <ItemGroup>
     <PackageReference Include="SocketIOClient" Version="4.0.5" />
+    <Content Include="..\..\cotulenh_board_11x12.png" Link="cotulenh_board_11x12.png"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\Start-LanClient.ps1" Link="Start-LanClient.ps1"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
