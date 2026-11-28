@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Text.Json;
 using System.Windows.Forms;
 
 namespace ClientAPP;
@@ -41,6 +42,22 @@ public class BoardControl : UserControl
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     [System.ComponentModel.Browsable(false)]
+    public bool NetworkMode
+    {
+        get => IsOnlineMode;
+        set => IsOnlineMode = value;
+    }
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
+    public bool InputEnabled { get; set; } = true;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
+    public bool IsMovePending { get; private set; }
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    [System.ComponentModel.Browsable(false)]
     public CaptureMode CurrentCaptureMode { get; set; } = CaptureMode.Occupy;
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
@@ -53,6 +70,7 @@ public class BoardControl : UserControl
 
     public event Action<PieceView, int, int, PieceView?>? OnPieceMoved;
     public event Action<PieceView, int, int, CaptureMode, bool>? OnOnlineMoveRequested;
+    public event Action<MoveRequest>? OnMoveRequested;
     public event Action<PieceView?>? OnPieceSelected;
     public event Action<CaptureMode>? OnCaptureModeChanged;
     public event Action<List<PieceView>>? OnStackedGroupSelected;
@@ -343,7 +361,7 @@ public class BoardControl : UserControl
     public void SelectSpecificPiece(PieceView piece)
     {
         if (isAnimatingExplosion || !piece.IsAlive) return;
-        if (IsOnlineMode && (CurrentTurn != PlayerSide || piece.Side != PlayerSide)) return;
+        if (IsOnlineMode && (!InputEnabled || IsMovePending || CurrentTurn != PlayerSide || piece.Side != PlayerSide)) return;
         SelectedPiece = piece;
         ValidMoves = GetValidMoves(piece);
         OnPieceSelected?.Invoke(piece);
@@ -356,10 +374,265 @@ public class BoardControl : UserControl
     private static readonly int[] DirY8 = { 1, -1, 0, 0, 1, 1, -1, -1 };
 
     /// <summary>
+    /// Tính toán nước đi khớp 100% với cotulenh_server/game_engine.py khi đấu Online/LAN.
+    /// </summary>
+    private List<Point> GetServerValidMoves(PieceView piece)
+    {
+        var moves = new List<Point>();
+        if (!piece.IsAlive) return moves;
+        int bonus = piece.IsHero ? 1 : 0;
+
+        void AddServerStepMoves(int maxSteps, bool diagonal, bool engineer = false)
+        {
+            int dirCount = diagonal ? 8 : 4;
+            for (int i = 0; i < dirCount; i++)
+            {
+                for (int step = 1; step <= maxSteps; step++)
+                {
+                    int tx = piece.X + DirX8[i] * step;
+                    int ty = piece.Y + DirY8[i] * step;
+                    if (!InBounds(tx, ty) || IsSea(tx) || IsHeadquarter(tx, ty)) break;
+                    if (IsCrossingRiver(piece.Y, ty) && !engineer && !IsShallowFord(piece.X)) break;
+
+                    var occs = GetPiecesAt(tx, ty);
+                    if (occs.Count == 0)
+                    {
+                        moves.Add(new Point(tx, ty));
+                    }
+                    else
+                    {
+                        if (occs.Any(p => p.Side != piece.Side) || CanStack(piece, occs))
+                        {
+                            moves.Add(new Point(tx, ty));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        switch (piece.Kind)
+        {
+            case PieceKind.Commander:
+                for (int i = 0; i < 4; i++)
+                {
+                    for (int step = 1; step < Math.Max(COLS, ROWS); step++)
+                    {
+                        int tx = piece.X + DirX4[i] * step;
+                        int ty = piece.Y + DirY4[i] * step;
+                        if (!InBounds(tx, ty) || IsSea(tx)) break;
+                        var occs = GetPiecesAt(tx, ty);
+                        if (occs.Count == 0)
+                        {
+                            moves.Add(new Point(tx, ty));
+                        }
+                        else
+                        {
+                            if (occs.Any(p => p.Side != piece.Side))
+                            {
+                                if (step <= 1 + bonus) moves.Add(new Point(tx, ty));
+                            }
+                            else if (CanStack(piece, occs))
+                            {
+                                moves.Add(new Point(tx, ty));
+                            }
+                            break;
+                        }
+                    }
+                }
+                break;
+
+            case PieceKind.Infantry:
+                AddServerStepMoves(1 + bonus, diagonal: piece.IsHero);
+                if (piece.X == 2 && GetPiecesAt(1, piece.Y).Any(p => p.Side != piece.Side))
+                    moves.Add(new Point(1, piece.Y));
+                break;
+
+            case PieceKind.Militia:
+                AddServerStepMoves(1 + bonus, diagonal: true);
+                if (piece.X == 2 && GetPiecesAt(1, piece.Y).Any(p => p.Side != piece.Side))
+                    moves.Add(new Point(1, piece.Y));
+                break;
+
+            case PieceKind.Engineer:
+                AddServerStepMoves(1 + bonus, diagonal: piece.IsHero, engineer: true);
+                break;
+
+            case PieceKind.AntiAir:
+                AddServerStepMoves(1 + bonus, diagonal: piece.IsHero);
+                break;
+
+            case PieceKind.Tank:
+                for (int i = 0; i < 4; i++)
+                {
+                    for (int step = 1; step <= 2 + bonus; step++)
+                    {
+                        int tx = piece.X + DirX4[i] * step;
+                        int ty = piece.Y + DirY4[i] * step;
+                        if (!InBounds(tx, ty)) break;
+                        if (IsSea(tx))
+                        {
+                            if (GetPiecesAt(tx, ty).Any(p => p.Side != piece.Side))
+                                moves.Add(new Point(tx, ty));
+                            break;
+                        }
+                        if (IsCrossingRiver(piece.Y, ty) && !IsShallowFord(piece.X)) break;
+                        var occs = GetPiecesAt(tx, ty);
+                        if (occs.Count == 0)
+                        {
+                            if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                        }
+                        else
+                        {
+                            if (occs.Any(p => p.Side != piece.Side))
+                            {
+                                if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                            }
+                            else if (CanStack(piece, occs))
+                            {
+                                moves.Add(new Point(tx, ty));
+                            }
+                            break;
+                        }
+                    }
+                }
+                break;
+
+            case PieceKind.Artillery:
+                for (int dir = 0; dir < 8; dir++)
+                {
+                    bool screened = false;
+                    for (int step = 1; step <= 3 + bonus; step++)
+                    {
+                        int tx = piece.X + DirX8[dir] * step;
+                        int ty = piece.Y + DirY8[dir] * step;
+                        if (!InBounds(tx, ty)) break;
+                        var occs = GetPiecesAt(tx, ty);
+                        if (!screened)
+                        {
+                            if (occs.Count == 0)
+                            {
+                                if (!IsSea(tx) && !IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                            }
+                            else
+                            {
+                                if (occs.Any(p => p.Side != piece.Side) && !IsHeadquarter(tx, ty))
+                                    moves.Add(new Point(tx, ty));
+                                else if (CanStack(piece, occs))
+                                    moves.Add(new Point(tx, ty));
+                                screened = true;
+                            }
+                        }
+                        else if (occs.Count > 0)
+                        {
+                            if (occs.Any(p => p.Side != piece.Side) && !IsHeadquarter(tx, ty))
+                                moves.Add(new Point(tx, ty));
+                            break;
+                        }
+                    }
+                }
+                break;
+
+            case PieceKind.Rocket:
+                for (int dir = 0; dir < 8; dir++)
+                {
+                    int maxR = (dir >= 4 ? 1 : 2) + bonus;
+                    for (int step = 1; step <= maxR; step++)
+                    {
+                        int tx = piece.X + DirX8[dir] * step;
+                        int ty = piece.Y + DirY8[dir] * step;
+                        if (!InBounds(tx, ty)) break;
+                        var occs = GetPiecesAt(tx, ty);
+                        if (occs.Count == 0)
+                        {
+                            if (!IsSea(tx) && !IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                        }
+                        else
+                        {
+                            if (occs.Any(p => p.Side != piece.Side))
+                            {
+                                if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                            }
+                            else if (CanStack(piece, occs))
+                            {
+                                moves.Add(new Point(tx, ty));
+                            }
+                            break;
+                        }
+                    }
+                }
+                break;
+
+            case PieceKind.AirForce:
+                for (int dir = 0; dir < 8; dir++)
+                {
+                    for (int step = 1; step <= 4 + bonus; step++)
+                    {
+                        int tx = piece.X + DirX8[dir] * step;
+                        int ty = piece.Y + DirY8[dir] * step;
+                        if (!InBounds(tx, ty)) break;
+                        var occs = GetPiecesAt(tx, ty);
+                        if (occs.Count == 0)
+                        {
+                            if (!IsSea(tx) && !IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                        }
+                        else if (occs.Any(p => p.Side != piece.Side))
+                        {
+                            if (!IsHeadquarter(tx, ty)) moves.Add(new Point(tx, ty));
+                        }
+                        else if (CanStack(piece, occs))
+                        {
+                            moves.Add(new Point(tx, ty));
+                        }
+                    }
+                }
+                break;
+
+            case PieceKind.Warship:
+                for (int dir = 0; dir < 8; dir++)
+                {
+                    for (int step = 1; step <= 4; step++)
+                    {
+                        int tx = piece.X + DirX8[dir] * step;
+                        int ty = piece.Y + DirY8[dir] * step;
+                        if (!InBounds(tx, ty)) break;
+                        var occs = GetPiecesAt(tx, ty);
+                        if (tx <= 2 || IsDeepRiver(tx, ty))
+                        {
+                            if (occs.Count == 0)
+                            {
+                                moves.Add(new Point(tx, ty));
+                                continue;
+                            }
+                            if (occs.Any(p => p.Side != piece.Side) || CanStack(piece, occs))
+                            {
+                                moves.Add(new Point(tx, ty));
+                            }
+                            break;
+                        }
+                        if (step <= 3 && occs.Any(p => p.Side != piece.Side) && !IsHeadquarter(tx, ty))
+                        {
+                            moves.Add(new Point(tx, ty));
+                        }
+                        break;
+                    }
+                }
+                break;
+        }
+
+        return moves.Distinct().ToList();
+    }
+
+    /// <summary>
     /// Tính toán tất cả các nước đi hợp lệ cho quân cờ dựa trên Luật Cờ Tư Lệnh
     /// </summary>
     public List<Point> GetValidMoves(PieceView piece)
     {
+        if (IsOnlineMode)
+        {
+            return GetServerValidMoves(piece);
+        }
+
         var moves = new List<Point>();
         if (!piece.IsAlive) return moves;
 
@@ -800,6 +1073,30 @@ public class BoardControl : UserControl
         var piece = Pieces.FirstOrDefault(p => p.PieceId == pieceId && p.IsAlive);
         if (piece == null) return;
 
+        if (IsOnlineMode)
+        {
+            if (!InputEnabled || IsMovePending || CurrentTurn != PlayerSide || piece.Side != PlayerSide) return;
+            if (!GetValidMoves(piece).Any(m => m.X == toX && m.Y == toY)) return;
+
+            IsMovePending = true;
+            var request = new MoveRequest
+            {
+                PieceId = piece.PieceId,
+                FromX = piece.X,
+                FromY = piece.Y,
+                ToX = toX,
+                ToY = toY,
+                CaptureMode = CurrentCaptureMode == CaptureMode.StandStill ? "stand" : "occupy",
+                MoveStackTogether = MoveStackTogether,
+            };
+            OnMoveRequested?.Invoke(request);
+            OnOnlineMoveRequested?.Invoke(piece, toX, toY, CurrentCaptureMode, MoveStackTogether);
+            SelectedPiece = null;
+            ValidMoves.Clear();
+            Invalidate();
+            return;
+        }
+
         bool isMoveValid = true;
 
         if (!isMoveValid)
@@ -1042,10 +1339,50 @@ public class BoardControl : UserControl
             }
         }
 
-        CurrentTurn = currentTurn;
-        SelectedPiece = null;
-        ValidMoves.Clear();
-        Invalidate();
+        InspectedFirePiece = null;
+        SetServerTurn(currentTurn);
+    }
+
+    public void LoadServerBoard(JsonElement snapshot, string turn)
+    {
+        var loaded = new List<PieceView>();
+        foreach (var entry in snapshot.EnumerateArray())
+        {
+            string kindName = entry.GetProperty("kind").GetString() ?? "";
+            var (kind, name, notation) = kindName switch
+            {
+                "commander" => (PieceKind.Commander, "Tư Lệnh", "★"),
+                "infantry" => (PieceKind.Infantry, "Bộ Binh", "B"),
+                "tank" => (PieceKind.Tank, "Xe Tăng", "T"),
+                "militia" => (PieceKind.Militia, "Dân Quân", "D"),
+                "engineer" => (PieceKind.Engineer, "Công Binh", "C"),
+                "artillery" => (PieceKind.Artillery, "Pháo Binh", "P"),
+                "anti_air" => (PieceKind.AntiAir, "Cao Xạ", "F"),
+                "rocket" => (PieceKind.Rocket, "Tên Lửa", "L"),
+                "air_force" => (PieceKind.AirForce, "Không Quân", "K"),
+                "warship" => (PieceKind.Warship, "Tàu Chiến", "H"),
+                _ => throw new FormatException($"Loại quân không hợp lệ: {kindName}"),
+            };
+            string side = entry.GetProperty("side").GetString() ?? "red";
+            int x = entry.GetProperty("x").GetInt32();
+            loaded.Add(new PieceView
+            {
+                PieceId = entry.GetProperty("piece_id").GetString() ?? "",
+                Kind = kind,
+                DisplayName = name,
+                Notation = notation,
+                Side = side,
+                X = x,
+                Y = entry.GetProperty("y").GetInt32(),
+                IsAlive = entry.GetProperty("alive").GetBoolean(),
+                IsHero = entry.GetProperty("hero").GetBoolean(),
+                Score = entry.GetProperty("score").GetInt32(),
+                AirportLocation = kind == PieceKind.AirForce ? new Point(x, side == "red" ? 1 : 10) : null,
+            });
+        }
+        Pieces = loaded;
+        InspectedFirePiece = null;
+        SetServerTurn(turn);
     }
 
     /// <summary>
@@ -1064,7 +1401,7 @@ public class BoardControl : UserControl
                 cap.IsAlive = false;
                 capturedPieces.Add(cap);
 
-                if (cap.Kind == PieceKind.Commander && actingPiece != null)
+                if (cap.Kind == PieceKind.Commander && actingPiece != null && !actingPiece.IsHero)
                 {
                     actingPiece.IsHero = true;
                     actingPiece.Score += 10;
@@ -1106,20 +1443,59 @@ public class BoardControl : UserControl
             CurrentTurn = nextTurn;
         }
 
+        IsMovePending = false;
         SelectedPiece = null;
         ValidMoves.Clear();
         Invalidate();
         return (actingPiece, capturedPieces);
     }
 
-    public void ClearSelection()
+    public void ApplyServerMove(JsonElement move, string? nextTurn)
     {
+        string pieceId = move.GetProperty("piece_id").GetString() ?? "";
+        var attacker = Pieces.FirstOrDefault(p => p.PieceId == pieceId)
+            ?? throw new FormatException($"Không tìm thấy quân {pieceId} trên bàn cờ.");
+        foreach (var id in move.GetProperty("captured").EnumerateArray())
+        {
+            var captured = Pieces.FirstOrDefault(p => p.PieceId == id.GetString());
+            if (captured == null) throw new FormatException("Dữ liệu quân bị bắt không khớp bàn cờ.");
+            if (captured.Kind == PieceKind.Commander && !attacker.IsHero)
+            {
+                attacker.IsHero = true;
+                attacker.Score += 10;
+            }
+            captured.IsAlive = false;
+        }
+        int toX = move.GetProperty("to")[0].GetInt32();
+        int toY = move.GetProperty("to")[1].GetInt32();
+        foreach (var id in move.GetProperty("moved").EnumerateArray())
+        {
+            var moved = Pieces.FirstOrDefault(p => p.PieceId == id.GetString())
+                ?? throw new FormatException("Dữ liệu quân di chuyển không khớp bàn cờ.");
+            moved.X = toX;
+            moved.Y = toY;
+        }
+        if (move.GetProperty("attacker_destroyed").GetBoolean()) attacker.IsAlive = false;
+        SetServerTurn(nextTurn ?? "");
+    }
+
+    public void SetServerTurn(string turn)
+    {
+        CurrentTurn = turn;
+        ClearMoveSelection();
+    }
+
+    public void ClearMoveSelection()
+    {
+        IsMovePending = false;
         SelectedPiece = null;
         ValidMoves.Clear();
         OnPieceSelected?.Invoke(null);
         OnStackedGroupSelected?.Invoke(new List<PieceView>());
         Invalidate();
     }
+
+    public void ClearSelection() => ClearMoveSelection();
 
     /// <summary>
     /// Quy tắc Quân Anh Hùng theo Rule.pdf (Chế độ Offline Beta1):
@@ -1812,7 +2188,7 @@ public class BoardControl : UserControl
         var piecesAtTile = GetPiecesAt(gx, gy);
 
         // Khi đấu Online: chỉ được điều khiển quân thuộc phe của mình và khi đang tới lượt phe mình
-        if (IsOnlineMode && CurrentTurn != PlayerSide)
+        if (IsOnlineMode && (!InputEnabled || IsMovePending || CurrentTurn != PlayerSide))
         {
             return;
         }
@@ -1867,16 +2243,8 @@ public class BoardControl : UserControl
                 {
                     // Nước đi nằm trong danh sách HỢP LỆ -> Gửi lên Server (nếu Online) hoặc đi cục bộ (nếu Offline)
                     var movingPiece = SelectedPiece;
-                    if (IsOnlineMode)
-                    {
-                        OnOnlineMoveRequested?.Invoke(movingPiece, gx, gy, CurrentCaptureMode, MoveStackTogether);
-                        ClearSelection();
-                    }
-                    else
-                    {
-                        MovePiece(movingPiece.PieceId, gx, gy);
-                        OnStackedGroupSelected?.Invoke(new List<PieceView>());
-                    }
+                    MovePiece(movingPiece.PieceId, gx, gy);
+                    OnStackedGroupSelected?.Invoke(new List<PieceView>());
                 }
                 else
                 {

@@ -4,17 +4,18 @@ namespace ClientAPP;
 
 /// <summary>
 /// Quản lý địa chỉ máy chủ dùng chung cho toàn bộ REST API và Socket.IO (hỗ trợ LAN / Cloud).
-/// Tự động lưu vào server_config.json để không cần nhập lại mỗi lần mở game.
+/// Ưu tiên biến môi trường COTULENH_SERVER_URL (khi chạy qua Start-LanClient.ps1 / LanSmoke),
+/// đồng thời hỗ trợ chỉnh trực tiếp trên LoginForm và lưu vào server_config.json.
 /// </summary>
 public static class ServerConfig
 {
     private const string DefaultServerUrl = "http://localhost:5000";
     private static readonly string ConfigFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "server_config.json");
 
-    private static string _baseUrl = LoadSavedUrl();
+    private static string _baseUrl = LoadInitialUrl();
 
     public static string BaseUrl => _baseUrl;
-    public static Uri BaseUri => new(_baseUrl);
+    public static Uri BaseUri => new($"{_baseUrl}/");
     public static Uri AuthApiBaseUri => new($"{_baseUrl}/api/auth/");
     public static Uri ApiBaseUri => new($"{_baseUrl}/api/");
 
@@ -25,7 +26,9 @@ public static class ServerConfig
         errorMessage = "";
         string normalized = NormalizeUrl(rawInput);
         if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) ||
+            !string.IsNullOrEmpty(uri.Query) ||
+            !string.IsNullOrEmpty(uri.Fragment))
         {
             errorMessage = "Địa chỉ máy chủ không hợp lệ (Ví dụ: http://192.168.1.15:5000)";
             return false;
@@ -70,8 +73,24 @@ public static class ServerConfig
         return text.TrimEnd('/');
     }
 
-    private static string LoadSavedUrl()
+    private static string LoadInitialUrl()
     {
+        string? envUrl = Environment.GetEnvironmentVariable("COTULENH_SERVER_URL");
+        if (!string.IsNullOrWhiteSpace(envUrl))
+        {
+            string normalized = NormalizeUrl(envUrl);
+            if (Uri.TryCreate(normalized, UriKind.Absolute, out var envUri) &&
+                (envUri.Scheme == Uri.UriSchemeHttp || envUri.Scheme == Uri.UriSchemeHttps) &&
+                string.IsNullOrEmpty(envUri.Query) &&
+                string.IsNullOrEmpty(envUri.Fragment))
+            {
+                return $"{envUri.Scheme}://{envUri.Authority}".TrimEnd('/');
+            }
+
+            throw new InvalidOperationException(
+                "COTULENH_SERVER_URL phải là địa chỉ HTTP/HTTPS của máy chủ, ví dụ http://192.168.1.10:5000.");
+        }
+
         try
         {
             if (File.Exists(ConfigFilePath))
@@ -81,9 +100,10 @@ public static class ServerConfig
                 if (data != null && !string.IsNullOrWhiteSpace(data.ServerUrl))
                 {
                     string normalized = NormalizeUrl(data.ServerUrl);
-                    if (Uri.TryCreate(normalized, UriKind.Absolute, out _))
+                    if (Uri.TryCreate(normalized, UriKind.Absolute, out var savedUri) &&
+                        (savedUri.Scheme == Uri.UriSchemeHttp || savedUri.Scheme == Uri.UriSchemeHttps))
                     {
-                        return normalized;
+                        return $"{savedUri.Scheme}://{savedUri.Authority}".TrimEnd('/');
                     }
                 }
             }
