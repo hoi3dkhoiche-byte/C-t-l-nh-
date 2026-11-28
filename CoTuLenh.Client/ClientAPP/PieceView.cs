@@ -14,7 +14,8 @@ public enum PieceKind
     AntiAir,      // Cao xạ (F)
     Rocket,       // Tên lửa (L)
     AirForce,     // Không quân (K)
-    Warship       // Hải quân (H)
+    Warship,      // Hải quân (H)
+    Headquarter   // Sở chỉ huy (S)
 }
 
 public class PieceView
@@ -179,6 +180,13 @@ public class PieceView
                 // Sóng nước
                 g.DrawArc(iconPen, cx - 10, cy + 3, 10, 5, 0, 180);
                 g.DrawArc(iconPen, cx, cy + 3, 10, 5, 0, 180);
+                break;
+
+            case PieceKind.Headquarter: // Sở Chỉ Huy (Lô cốt / Công sự)
+                g.FillRectangle(iconBrush, cx - 10, cy - 2, 20, 10);
+                g.FillRectangle(iconBrush, cx - 10, cy - 7, 5, 5);
+                g.FillRectangle(iconBrush, cx - 2, cy - 7, 5, 5);
+                g.FillRectangle(iconBrush, cx + 5, cy - 7, 5, 5);
                 break;
         }
     }

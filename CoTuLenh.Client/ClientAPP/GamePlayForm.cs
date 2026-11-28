@@ -5,24 +5,56 @@ namespace ClientAPP;
 public partial class GamePlayForm : BaseForm
 {
     private readonly RoomModel _room;
-    private int moveCount = 1;
-    private int currentTurnSeconds = 45;
-    private bool isBotEnabled = false; // Mặc định tắt để bạn tự do thử nghiệm điều khiển cả 2 bên Đỏ và Xanh
-    private Button? btnToggleBot;
+    private readonly bool _isOnline;
+    private readonly string _myColor;
+    private readonly List<ServerPieceDto>? _initialServerBoard;
+    private readonly string _initialTurn;
+    private readonly int _turnDurationSeconds;
 
-    public GamePlayForm(RoomModel room)
+    private int moveCount = 1;
+    private int _lastMoveNumber = 0;
+    private long _lastServerRevision = -1;
+    private bool _waitingForResync = false;
+    private int currentTurnSeconds = 45;
+    private int totalMatchSeconds = 30 * 60; // Chế độ Tấn công tổng lực: 30 phút (1800 giây)
+    private bool isBotEnabled = false;
+    private bool _matchFinished = false;
+    private Button? btnToggleBot;
+    private Label? lblMatchTimer;
+
+    public GamePlayForm(
+        RoomModel room,
+        bool isOnline = false,
+        string myColor = "red",
+        List<ServerPieceDto>? initialBoard = null,
+        string initialTurn = "red",
+        int turnSeconds = 45,
+        int initialMoveCount = 1,
+        int? initialTurnRemainingSeconds = null,
+        long initialRevision = -1)
     {
         _room = room;
+        _isOnline = isOnline;
+        _myColor = myColor;
+        _initialServerBoard = initialBoard;
+        _initialTurn = initialTurn;
+        _turnDurationSeconds = turnSeconds > 0 ? turnSeconds : 45;
+        currentTurnSeconds = initialTurnRemainingSeconds.HasValue && initialTurnRemainingSeconds.Value >= 0
+            ? initialTurnRemainingSeconds.Value
+            : _turnDurationSeconds;
+        moveCount = Math.Max(1, initialMoveCount);
+        _lastMoveNumber = Math.Max(0, moveCount - 1);
+        _lastServerRevision = initialRevision;
+
         InitializeComponent();
         this.Load += GamePlayForm_Load;
         this.FormClosed += GamePlayForm_FormClosed;
-        this.FormClosed += GamePlayForm_RealtimeClosed;
 
-        RealtimeService.Instance.OnChatMessage += Realtime_OnChatMessage;
-        RealtimeService.Instance.OnChatRejected += Realtime_OnSystemText;
-        RealtimeService.Instance.OnRoomNotice += Realtime_OnSystemText;
+        board.IsOnlineMode = _isOnline;
+        board.PlayerSide = _myColor;
 
         board.OnPieceMoved += Board_OnPieceMoved;
+        board.OnOnlineMoveRequested += Board_OnOnlineMoveRequested;
         board.OnPieceSelected += Board_OnPieceSelected;
         board.OnCaptureModeChanged += Board_OnCaptureModeChanged;
         board.OnStackedGroupSelected += Board_OnStackedGroupSelected;
@@ -34,87 +66,514 @@ public partial class GamePlayForm : BaseForm
 
     private void GamePlayForm_Load(object? sender, EventArgs e)
     {
-        var user = SessionService.Instance.CurrentUser?.Username ?? "Tôi";
-        lblPlayerName.Text = $"🔴 {user} (Đỏ)";
-        lblOpponentName.Text = $"🔵 {_room.GuestUsername ?? "Đối thủ"} (Xanh)";
+        var meName = SessionService.Instance.CurrentUser?.Username ?? "Tôi";
+        string redName = !string.IsNullOrWhiteSpace(_room.HostUsername) ? _room.HostUsername : "Phe Đỏ";
+        string blueName = !string.IsNullOrWhiteSpace(_room.GuestUsername) ? _room.GuestUsername : "Phe Xanh";
 
-        // Nút chuyển đổi chế độ Bot / Tự cầm 2 bên
-        btnToggleBot = new Button
+        if (_isOnline)
         {
-            Text = isBotEnabled ? "🤖 Bot: ĐANG BẬT" : "👤 Chế độ: TỰ CẦM 2 BÊN",
-            Location = new Point(10, 605),
-            Size = new Size(240, 36),
-            BackColor = isBotEnabled ? Color.FromArgb(39, 174, 96) : Color.FromArgb(41, 128, 185),
-            ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
-        };
-        btnToggleBot.Click += (s, ev) =>
-        {
-            isBotEnabled = !isBotEnabled;
-            btnToggleBot.Text = isBotEnabled ? "🤖 Bot: ĐANG BẬT" : "👤 Chế độ: TỰ CẦM 2 BÊN";
-            btnToggleBot.BackColor = isBotEnabled ? Color.FromArgb(39, 174, 96) : Color.FromArgb(41, 128, 185);
-            lstChat.Items.Add(isBotEnabled ? "[Hệ thống] Đã BẬT Bot tự đánh cho phe Xanh." : "[Hệ thống] Đã TẮT Bot (Bạn tự điều khiển cả 2 bên).");
-            if (isBotEnabled && board.CurrentTurn == "blue")
+            this.Text = $"Cờ Tư Lệnh Online - Phòng {_room.RoomCode} ({(_myColor == "red" ? "PHE ĐỎ" : "PHE XANH")})";
+
+            if (_myColor == "red")
             {
-                SimulateOpponentMove();
+                lblPlayerName.Text = $"🔴 {meName} (Bạn - Đỏ)";
+                lblPlayerName.ForeColor = Color.FromArgb(192, 57, 43);
+                lblOpponentName.Text = $"🔵 {blueName} (Đối thủ - Xanh)";
+                lblOpponentName.ForeColor = Color.FromArgb(41, 128, 185);
             }
-        };
-        pnlRight.Controls.Add(btnToggleBot);
+            else
+            {
+                lblPlayerName.Text = $"🔵 {meName} (Bạn - Xanh)";
+                lblPlayerName.ForeColor = Color.FromArgb(41, 128, 185);
+                lblOpponentName.Text = $"🔴 {redName} (Đối thủ - Đỏ)";
+                lblOpponentName.ForeColor = Color.FromArgb(192, 57, 43);
+            }
+
+            // Nạp bàn cờ chuẩn từ Server và đăng ký nhận sự kiện Realtime (gồm cả Chat trong trận)
+            board.LoadBoardFromServer(_initialServerBoard, _initialTurn);
+            board.InputEnabled = RealtimeService.Instance.IsConnected;
+            SubscribeOnlineEvents();
+
+            btnDraw.Enabled = false;
+            btnDraw.BackColor = Color.LightGray;
+
+            AddChatLine($"[Hệ thống] ⚔️ Trận đấu LAN/Online phòng {_room.RoomCode} bắt đầu!");
+            AddChatLine($"[Hệ thống] Bạn cầm quân {(_myColor == "red" ? "🔴 PHE ĐỎ (Nửa dưới Y=0..4)" : "🔵 PHE XANH (Nửa trên Y=7..11)")}.");
+            AddChatLine($"[Hệ thống] Thời gian mỗi lượt: {_turnDurationSeconds} giây.");
+        }
+        else
+        {
+            // Đồng hồ tổng trận đấu 30 phút (Chế độ Tấn công tổng lực Offline Beta1)
+            lblMatchTimer = new Label
+            {
+                Text = "⏳ TỔNG LỰC: 30:00",
+                Location = new Point(10, 602),
+                Size = new Size(240, 28),
+                TextAlign = ContentAlignment.MiddleCenter,
+                BackColor = Color.FromArgb(44, 62, 80),
+                ForeColor = Color.FromArgb(241, 196, 15),
+                Font = new Font("Segoe UI", 10F, FontStyle.Bold)
+            };
+            pnlRight.Controls.Add(lblMatchTimer);
+            lblPlayerName.Text = $"🔴 {meName} (Đỏ)";
+            lblOpponentName.Text = $"🔵 {blueName} (Xanh)";
+
+            // Nút chuyển đổi chế độ Bot / Tự cầm 2 bên khi tập luyện Offline
+            btnToggleBot = new Button
+            {
+                Text = isBotEnabled ? "🤖 Bot: ĐANG BẬT" : "👤 Chế độ: TỰ CẦM 2 BÊN",
+                Location = new Point(10, 635),
+                Size = new Size(240, 36),
+                BackColor = isBotEnabled ? Color.FromArgb(39, 174, 96) : Color.FromArgb(41, 128, 185),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
+            };
+            btnToggleBot.Click += (s, ev) =>
+            {
+                isBotEnabled = !isBotEnabled;
+                btnToggleBot.Text = isBotEnabled ? "🤖 Bot: ĐANG BẬT" : "👤 Chế độ: TỰ CẦM 2 BÊN";
+                btnToggleBot.BackColor = isBotEnabled ? Color.FromArgb(39, 174, 96) : Color.FromArgb(41, 128, 185);
+                AddChatLine(isBotEnabled ? "[Hệ thống] Đã BẬT Bot tự đánh cho phe Xanh." : "[Hệ thống] Đã TẮT Bot (Bạn tự điều khiển cả 2 bên).");
+                if (isBotEnabled && board.CurrentTurn == "blue")
+                {
+                    SimulateOpponentMove();
+                }
+            };
+            pnlRight.Controls.Add(btnToggleBot);
+
+            AddChatLine("[Hệ thống] Trận đấu Cờ Tư Lệnh bắt đầu! (Chế độ: TẤN CÔNG TỔNG LỰC - 30 phút)");
+            AddChatLine("[Hệ thống] Điều kiện thắng: Diệt Tư lệnh đối phương (+50đ) hoặc hơn tổng điểm sau 30 phút.");
+            AddChatLine("[Hệ thống] Lượt đầu tiên: PHE ĐỎ");
+        }
 
         // Sự kiện khung chế độ ăn quân và nhóm quân xếp chồng
         btnToggleCaptureMode.Click += (s, ev) => board.ToggleCaptureMode();
         chkMoveStackTogether.CheckedChanged += (s, ev) =>
         {
             board.MoveStackTogether = chkMoveStackTogether.Checked;
-            lstChat.Items.Add(board.MoveStackTogether
+            AddChatLine(board.MoveStackTogether
                 ? "[Ghép quân] Đã BẬT: Cõng theo cả cụm khi di chuyển."
                 : "[Ghép quân] Đã TẮT: Tách quân di chuyển riêng lẻ.");
-            lstChat.TopIndex = lstChat.Items.Count - 1;
         };
-
-        lstChat.Items.Add("[Hệ thống] Trận đấu Cờ Tư Lệnh bắt đầu!");
-        lstChat.Items.Add("[Hệ thống] Hỗ trợ: Nhóm xếp chồng (Ghép quân), Đổi chế độ ăn & Soi vành đai lửa bằng chuột phải.");
-        lstChat.Items.Add("[Hệ thống] Lượt đầu tiên: PHE ĐỎ");
 
         UpdateTurnDisplay();
         UpdateScores();
         UpdateCaptureModeDisplay();
         UpdateStackSelectDisplay(new List<PieceView>());
+        UpdateTimerLabels();
         gameTimer.Start();
     }
 
-    private void GamePlayForm_FormClosed(object? sender, FormClosedEventArgs e)
+    private void SubscribeOnlineEvents()
+    {
+        var rt = RealtimeService.Instance;
+        rt.OnConnected += HandleSocketConnected;
+        rt.OnDisconnected += HandleSocketDisconnected;
+        rt.OnMoveMade += HandleServerMoveMade;
+        rt.OnMoveRejected += HandleServerMoveRejected;
+        rt.OnTurnTimeout += HandleServerTurnTimeout;
+        rt.OnOpponentDisconnected += HandleOpponentDisconnected;
+        rt.OnPlayerReconnected += HandlePlayerReconnected;
+        rt.OnRoomJoined += HandleRoomRejoinedResync;
+        rt.OnGameOver += HandleServerGameOver;
+        rt.OnSocketError += HandleSocketError;
+        rt.OnChatMessage += HandleChatMessage;
+        rt.OnChatRejected += HandleChatRejected;
+    }
+
+    private void UnsubscribeOnlineEvents()
+    {
+        var rt = RealtimeService.Instance;
+        rt.OnConnected -= HandleSocketConnected;
+        rt.OnDisconnected -= HandleSocketDisconnected;
+        rt.OnMoveMade -= HandleServerMoveMade;
+        rt.OnMoveRejected -= HandleServerMoveRejected;
+        rt.OnTurnTimeout -= HandleServerTurnTimeout;
+        rt.OnOpponentDisconnected -= HandleOpponentDisconnected;
+        rt.OnPlayerReconnected -= HandlePlayerReconnected;
+        rt.OnRoomJoined -= HandleRoomRejoinedResync;
+        rt.OnGameOver -= HandleServerGameOver;
+        rt.OnSocketError -= HandleSocketError;
+        rt.OnChatMessage -= HandleChatMessage;
+        rt.OnChatRejected -= HandleChatRejected;
+    }
+
+    private void RunOnUi(Action action)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(action); } catch { }
+        }
+        else
+        {
+            action();
+        }
+    }
+
+    private void AddChatLine(string line)
+    {
+        lstChat.Items.Add(line);
+        lstChat.TopIndex = lstChat.Items.Count - 1;
+    }
+
+    private void HandleChatMessage(ChatMessageModel msg)
+    {
+        RunOnUi(() => AddChatLine($"[{msg.Username}]: {msg.Message}"));
+    }
+
+    private void HandleChatRejected(string reasonText)
+    {
+        RunOnUi(() => AddChatLine($"[Hệ thống] {reasonText}"));
+    }
+
+    private async void Board_OnOnlineMoveRequested(PieceView piece, int toX, int toY, CaptureMode captureMode, bool moveStack)
+    {
+        try
+        {
+            await RealtimeService.Instance.MakeMoveAsync(
+                piece.PieceId,
+                piece.X,
+                piece.Y,
+                toX,
+                toY,
+                captureMode,
+                moveStack
+            );
+        }
+        catch (Exception ex)
+        {
+            RunOnUi(() =>
+            {
+                board.ClearMoveSelection();
+                board.InputEnabled = RealtimeService.Instance.IsConnected && !_matchFinished && !_waitingForResync;
+                AddChatLine($"[Hệ thống] Không gửi được nước đi: {ex.Message}");
+            });
+        }
+    }
+
+    private void HandleSocketDisconnected()
+    {
+        RunOnUi(() =>
+        {
+            if (_matchFinished) return;
+            _waitingForResync = true;
+            board.InputEnabled = false;
+            board.ClearMoveSelection();
+            AddChatLine("[Hệ thống] ⚠️ Mất kết nối máy chủ. Đang tự động kết nối lại...");
+        });
+    }
+
+    private void HandleSocketConnected()
+    {
+        RunOnUi(() =>
+        {
+            if (!_matchFinished)
+            {
+                AddChatLine("[Hệ thống] 🔄 Đã kết nối lại máy chủ, đang đồng bộ thế cờ...");
+            }
+        });
+    }
+
+    private bool TryApplyAuthoritativeSnapshot(ResyncGameDto? snapshot)
+    {
+        if (snapshot == null) return false;
+        if (snapshot.Revision >= 0 && snapshot.Revision < _lastServerRevision) return false;
+
+        board.LoadBoardFromServer(snapshot.Board, snapshot.Turn);
+        currentTurnSeconds = snapshot.TurnRemainingSeconds > 0 ? snapshot.TurnRemainingSeconds : _turnDurationSeconds;
+        _lastMoveNumber = snapshot.MoveCount;
+        moveCount = _lastMoveNumber + 1;
+        if (snapshot.Revision >= 0) _lastServerRevision = snapshot.Revision;
+        return true;
+    }
+
+    private void HandleServerMoveMade(MoveMadeEvent ev)
+    {
+        RunOnUi(() =>
+        {
+            var m = ev.Move;
+            if (m.No > 0 && m.No <= _lastMoveNumber) return;
+
+            var preMovePiece = board.Pieces.FirstOrDefault(p => p.PieceId == m.PieceId);
+            string pieceName = preMovePiece?.DisplayName ?? m.PieceId;
+            var capturedNames = m.Captured
+                .Select(cid => board.Pieces.FirstOrDefault(p => p.PieceId == cid)?.DisplayName ?? cid)
+                .ToList();
+
+            if (ev.Game != null)
+            {
+                if (!TryApplyAuthoritativeSnapshot(ev.Game)) return;
+            }
+            else
+            {
+                board.ApplyServerMove(m, ev.NextTurn);
+                currentTurnSeconds = _turnDurationSeconds;
+            }
+
+            string sideLabel = m.By == "red" ? "Đỏ" : "Xanh";
+            int destX = m.To.Count > 0 ? m.To[0] : 0;
+            int destY = m.To.Count > 1 ? m.To[1] : 0;
+
+            string capText = capturedNames.Count > 0
+                ? $" [Ăn: {string.Join(", ", capturedNames)}]"
+                : "";
+            string downText = m.AttackerDestroyed ? " [Bị phòng không bắn hạ!]" : "";
+            string actionStr = m.StandShoot ? " 🎯 Bắn tại chỗ ➔ " : " ➔ ";
+
+            int num = m.No > 0 ? m.No : moveCount++;
+            _lastMoveNumber = Math.Max(_lastMoveNumber, num);
+            moveCount = Math.Max(moveCount, _lastMoveNumber + 1);
+
+            string log = $"{num}. {pieceName} ({sideLabel}){actionStr}({destX}, {destY}){capText}{downText}";
+            lstMoveLog.Items.Add(log);
+            lstMoveLog.TopIndex = lstMoveLog.Items.Count - 1;
+
+            UpdateTimerLabels();
+            UpdateTurnDisplay();
+            UpdateScores();
+            UpdateCaptureModeDisplay();
+            UpdateStackSelectDisplay(new List<PieceView>());
+        });
+    }
+
+    private void HandleServerMoveRejected(MoveRejectedEvent ev)
+    {
+        RunOnUi(() =>
+        {
+            board.ClearMoveSelection();
+            string reasonVi = ev.Reason switch
+            {
+                "NOT_YOUR_TURN" => "Chưa tới lượt đi của bạn!",
+                "ILLEGAL_MOVE" => "Nước đi không hợp lệ theo luật máy chủ!",
+                "OUT_OF_SYNC" => "Bàn cờ bị lệch đồng bộ! Đang tải lại trạng thái từ máy chủ...",
+                "NOT_YOUR_PIECE" => "Quân cờ này không thuộc phe của bạn!",
+                _ => $"Máy chủ từ chối nước đi ({ev.Reason})"
+            };
+            AddChatLine($"[Máy chủ] ❌ {reasonVi}");
+            if (ev.Reason == "OUT_OF_SYNC")
+            {
+                _waitingForResync = true;
+                board.InputEnabled = false;
+                _ = RealtimeService.Instance.JoinRoomAsync(_room.RoomCode);
+            }
+        });
+    }
+
+    private void HandleServerTurnTimeout(TurnTimeoutEvent ev)
+    {
+        RunOnUi(() =>
+        {
+            if (ev.Game != null)
+            {
+                if (!TryApplyAuthoritativeSnapshot(ev.Game)) return;
+            }
+            else
+            {
+                board.SetServerTurn(ev.NextTurn);
+                currentTurnSeconds = _turnDurationSeconds;
+            }
+
+            UpdateTimerLabels();
+            UpdateTurnDisplay();
+            UpdateCaptureModeDisplay();
+
+            string skippedVi = ev.Skipped == "red" ? "Phe Đỏ" : "Phe Xanh";
+            AddChatLine($"[Hệ thống] ⏰ {skippedVi} hết thời gian suy nghĩ và bị mất lượt!");
+        });
+    }
+
+    private void HandleOpponentDisconnected(OpponentDisconnectedEvent ev)
+    {
+        RunOnUi(() => AddChatLine($"[Hệ thống] ⚠️ Đối thủ bị mất kết nối mạng! Máy chủ đang giữ chỗ chờ {ev.TimeoutSeconds}s..."));
+    }
+
+    private void HandlePlayerReconnected(UserIdEvent ev)
+    {
+        RunOnUi(() =>
+        {
+            board.InputEnabled = RealtimeService.Instance.IsConnected && !_waitingForResync;
+            AddChatLine("[Hệ thống] ✅ Đối thủ đã kết nối lại thành công! Trận đấu tiếp tục.");
+        });
+    }
+
+    private void HandleRoomRejoinedResync(RoomJoinedEvent ev)
+    {
+        RunOnUi(() =>
+        {
+            if (ev.Game != null)
+            {
+                TryApplyAuthoritativeSnapshot(ev.Game);
+                _waitingForResync = false;
+                board.InputEnabled = RealtimeService.Instance.IsConnected;
+                UpdateTimerLabels();
+                UpdateTurnDisplay();
+                UpdateScores();
+                AddChatLine("[Hệ thống] 🔄 Đã khôi phục và đồng bộ lại bàn cờ từ máy chủ!");
+            }
+        });
+    }
+
+    private void HandleSocketError(SocketErrorEvent err)
+    {
+        RunOnUi(() => AddChatLine($"[Lỗi máy chủ] {err.Message} ({err.Code})"));
+    }
+
+    private void HandleServerGameOver(GameOverEvent ev)
+    {
+        RunOnUi(async () =>
+        {
+            if (_matchFinished) return;
+            _matchFinished = true;
+            gameTimer.Stop();
+            UnsubscribeOnlineEvents();
+
+            bool isDraw = ev.Result == "draw";
+            bool isVictory = !isDraw && (
+                (ev.Result == "red_win" && _myColor == "red") ||
+                (ev.Result == "blue_win" && _myColor == "blue")
+            );
+
+            int myEloDelta = _myColor == "red"
+                ? (ev.EloChange?.Red ?? 0)
+                : (ev.EloChange?.Blue ?? 0);
+
+            string reasonVi = ev.Reason switch
+            {
+                "commander_captured" => isVictory
+                    ? "Tư Lệnh đối phương đã bị tiêu diệt!"
+                    : "Tư Lệnh phe bạn đã bị tiêu diệt!",
+                "no_ground_forces" => isVictory
+                    ? "Toàn bộ lực lượng chủ lực bộ binh/tăng/pháo của đối phương đã bị tiêu diệt!"
+                    : "Toàn bộ lực lượng chủ lực của bạn đã bị tiêu diệt!",
+                "no_legal_moves" => isVictory
+                    ? "Đối phương không còn nước đi hợp lệ!"
+                    : "Phe bạn không còn nước đi hợp lệ!",
+                "opponent_left" => isVictory
+                    ? "Đối thủ đã rời trận / đầu hàng!"
+                    : "Bạn đã rời khỏi trận đấu!",
+                "disconnect_timeout" => isVictory
+                    ? "Đối thủ mất kết nối quá thời gian quy định!"
+                    : "Bạn mất kết nối quá thời gian quy định!",
+                _ => $"Kết thúc ván đấu ({ev.Reason})"
+            };
+
+            var refreshedUser = await AuthService.GetMeAsync();
+            if (refreshedUser != null)
+            {
+                SessionService.Instance.SetCurrentUser(refreshedUser, SessionService.Instance.Token);
+            }
+
+            string title = isDraw ? "HÒA TRẬN!" : (isVictory ? "CHIẾN THẮNG!" : "THẤT BẠI!");
+            string outcomeText = isDraw ? "Hòa!" : (isVictory ? "Bạn đã chiến thắng!" : "Bạn đã thua!");
+            string msg = $"{reasonVi}\n\n" +
+                         $"Kết quả: {outcomeText}\n" +
+                         $"Biến động ELO: {(myEloDelta >= 0 ? "+" : "")}{myEloDelta}";
+
+            MessageBox.Show(
+                this,
+                msg,
+                title,
+                MessageBoxButtons.OK,
+                isVictory ? MessageBoxIcon.Information : MessageBoxIcon.Exclamation
+            );
+
+            this.FormClosed -= GamePlayForm_FormClosed;
+            new LobbyForm().Show();
+            this.Close();
+        });
+    }
+
+    private async void GamePlayForm_FormClosed(object? sender, FormClosedEventArgs e)
     {
         gameTimer.Stop();
+        UnsubscribeOnlineEvents();
+
+        if (_isOnline && !_matchFinished)
+        {
+            _matchFinished = true;
+            await RealtimeService.Instance.LeaveRoomAsync(_room.RoomCode);
+            var refreshed = await AuthService.GetMeAsync();
+            if (refreshed != null)
+            {
+                SessionService.Instance.SetCurrentUser(refreshed, SessionService.Instance.Token);
+            }
+        }
+
         new LobbyForm().Show();
+    }
+
+    private void UpdateTimerLabels()
+    {
+        int cur = Math.Max(0, currentTurnSeconds);
+        string activeStr = $"⏱ {cur / 60:D2}:{cur % 60:D2}";
+        string idleStr = $"⏱ {_turnDurationSeconds / 60:D2}:{_turnDurationSeconds % 60:D2}";
+
+        bool isMyTurn = board.CurrentTurn == (_isOnline ? _myColor : "red");
+        if (isMyTurn)
+        {
+            lblPlayerTimer.Text = activeStr;
+            lblOpponentTimer.Text = idleStr;
+        }
+        else
+        {
+            lblOpponentTimer.Text = activeStr;
+            lblPlayerTimer.Text = idleStr;
+        }
     }
 
     private void GameTimer_Tick(object? sender, EventArgs e)
     {
-        currentTurnSeconds--;
-        string timeStr = $"⏱ 00:{currentTurnSeconds:D2}";
+        if (board.IsAnimating) return;
 
-        if (board.CurrentTurn == "red")
+        // 1. Đếm ngược đồng hồ tổng 30 phút (Tấn công tổng lực)
+        if (totalMatchSeconds > 0)
         {
-            lblPlayerTimer.Text = timeStr;
-            lblOpponentTimer.Text = "⏱ 00:45";
+            totalMatchSeconds--;
         }
-        else
+        if (lblMatchTimer != null)
         {
-            lblOpponentTimer.Text = timeStr;
-            lblPlayerTimer.Text = "⏱ 00:45";
+            int mins = Math.Max(0, totalMatchSeconds) / 60;
+            int secs = Math.Max(0, totalMatchSeconds) % 60;
+            lblMatchTimer.Text = $"⏳ TỔNG LỰC: {mins:D2}:{secs:D2}";
         }
 
-        if (currentTurnSeconds <= 0)
+        if (!_isOnline && totalMatchSeconds <= 0)
         {
-            currentTurnSeconds = 45;
-            // Hết giờ -> Đổi lượt
+            int redScore = board.Pieces.Where(p => p.Side == "red" && p.IsAlive).Sum(p => p.Score);
+            int blueScore = board.Pieces.Where(p => p.Side == "blue" && p.IsAlive).Sum(p => p.Score);
+            if (redScore > blueScore)
+            {
+                EndOfflineGame(true, $"Hết 30 phút Tấn công tổng lực! Phe Đỏ thắng điểm ({redScore}đ vs {blueScore}đ).");
+            }
+            else if (blueScore > redScore)
+            {
+                EndOfflineGame(false, $"Hết 30 phút Tấn công tổng lực! Phe Xanh thắng điểm ({blueScore}đ vs {redScore}đ).");
+            }
+            else
+            {
+                EndOfflineGame(true, $"Hết 30 phút Tấn công tổng lực! Hai bên hòa điểm ({redScore}đ - {blueScore}đ).");
+            }
+            return;
+        }
+
+        // 2. Đếm ngược thời gian mỗi lượt
+        if (currentTurnSeconds > 0)
+        {
+            currentTurnSeconds--;
+        }
+        UpdateTimerLabels();
+
+        // Khi đấu Online: Server là bên quyết định hết giờ qua sự kiện 'turn_timeout'
+        if (!_isOnline && currentTurnSeconds <= 0)
+        {
+            currentTurnSeconds = _turnDurationSeconds;
             board.CurrentTurn = board.CurrentTurn == "red" ? "blue" : "red";
             UpdateTurnDisplay();
             UpdateCaptureModeDisplay();
             UpdateStackSelectDisplay(new List<PieceView>());
-            lstChat.Items.Add("[Hệ thống] Hết thời gian lượt đi!");
+            AddChatLine("[Hệ thống] Hết thời gian lượt đi!");
         }
     }
 
@@ -128,14 +587,7 @@ public partial class GamePlayForm : BaseForm
         else
         {
             var stacked = board.GetPiecesAt(piece.X, piece.Y);
-            if (stacked.Count > 1)
-            {
-                UpdateStackSelectDisplay(stacked);
-            }
-            else
-            {
-                UpdateStackSelectDisplay(new List<PieceView>());
-            }
+            UpdateStackSelectDisplay(stacked.Count > 1 ? stacked : new List<PieceView>());
         }
     }
 
@@ -156,13 +608,12 @@ public partial class GamePlayForm : BaseForm
         {
             string sideStr = piece.Side == "red" ? "Phe Đỏ" : "Phe Xanh";
             float radius = BoardControl.GetFireRingRadius(piece.Kind);
-            lstChat.Items.Add($"[Trinh sát] 🔥 Đang soi vành đai lửa của {piece.DisplayName} ({sideStr}) - Bán kính {radius} nấc.");
+            AddChatLine($"[Trinh sát] 🔥 Đang soi vành đai lửa của {piece.DisplayName} ({sideStr}) - Bán kính {radius} nấc.");
         }
         else
         {
-            lstChat.Items.Add("[Trinh sát] Đã tắt soi vành đai lửa.");
+            AddChatLine("[Trinh sát] Đã tắt soi vành đai lửa.");
         }
-        lstChat.TopIndex = lstChat.Items.Count - 1;
     }
 
     private void UpdateCaptureModeDisplay()
@@ -173,7 +624,16 @@ public partial class GamePlayForm : BaseForm
             string sideStr = piece.Side == "red" ? "Đỏ" : "Xanh";
             lblCurrentPieceCapture.Text = $"Quân: {piece.DisplayName} ({sideStr})";
 
-            if (BoardControl.HasMultipleCaptureModes(piece.Kind))
+            if (!_isOnline && piece.Kind == PieceKind.AirForce)
+            {
+                btnToggleCaptureMode.Enabled = false;
+                lblCaptureModeStatus.Text = "🛩️ Tự động theo mục tiêu";
+                lblCaptureModeStatus.ForeColor = Color.FromArgb(41, 128, 185);
+                btnToggleCaptureMode.Text = "🔄 TỰ ĐỘNG THEO TÌNH HUỐNG";
+                btnToggleCaptureMode.BackColor = Color.Gray;
+                lblCaptureModeHelp.Text = "• Không quân: Thế chỗ nếu địch là Không quân; Cảm tử nếu trong vành đai lửa; Ném bom từ xa nếu ngoài vành đai.";
+            }
+            else if (BoardControl.HasMultipleCaptureModes(piece.Kind))
             {
                 btnToggleCaptureMode.Enabled = true;
                 if (board.CurrentCaptureMode == CaptureMode.Occupy)
@@ -193,9 +653,9 @@ public partial class GamePlayForm : BaseForm
 
                 lblCaptureModeHelp.Text = piece.Kind switch
                 {
-                    PieceKind.AirForce => "• Oanh tạc bay về: diệt địch xong bay trở về vị trí an toàn.",
+                    PieceKind.AirForce => "• Oanh tạc tại chỗ: tiêu diệt mục tiêu mà không tiến vào ô địch.",
                     PieceKind.Artillery => "• Bắn tại chỗ: đứng tại chỗ nã pháo tiêu diệt từ xa (1-3 nấc).",
-                    PieceKind.Warship => "• Pháo hạm tại chỗ: đứng tại chỗ bắn phá đất liền/biển từ xa.",
+                    PieceKind.Warship => "• Hải quân: Thế chỗ trên biển/bờ; Xạ kích đất liền (3 ô).",
                     PieceKind.Tank => "• Bắn tại chỗ: đứng trên bờ bắn tiêu diệt mục tiêu ven biển/hải quân.",
                     _ => "• Chuyển đổi giữa ăn thế chỗ và bắn tại chỗ."
                 };
@@ -281,8 +741,7 @@ public partial class GamePlayForm : BaseForm
                 board.SelectSpecificPiece(p);
                 UpdateStackSelectDisplay(pieces);
                 UpdateCaptureModeDisplay();
-                lstChat.Items.Add($"[Ghép quân] Đã chọn {p.DisplayName} trong nhóm quân để điều khiển.");
-                lstChat.TopIndex = lstChat.Items.Count - 1;
+                AddChatLine($"[Ghép quân] Đã chọn {p.DisplayName} trong nhóm quân để điều khiển.");
             };
 
             flowStackPieces.Controls.Add(btn);
@@ -303,14 +762,35 @@ public partial class GamePlayForm : BaseForm
             PieceKind.Rocket => "🚀",
             PieceKind.AirForce => "🛩️",
             PieceKind.Warship => "⚓",
+            PieceKind.Headquarter => "🏰",
             _ => "♟"
         };
     }
 
+    // Chế độ Offline Beta1 (chỉ kích hoạt khi _isOnline == false)
     private void Board_OnPieceMoved(PieceView piece, int toX, int toY, PieceView? capturedPiece)
     {
+        if (_isOnline) return;
+
         string capInfo = capturedPiece != null ? $" [Ăn: {capturedPiece.DisplayName}]" : "";
-        string actionType = (piece.X == toX && piece.Y == toY) ? " ➔ " : " 🎯 Bắn tại chỗ ➔ ";
+        string actionType;
+        if (!piece.IsAlive && piece.Kind == PieceKind.AirForce)
+        {
+            actionType = capturedPiece != null ? " 💥 Cảm tử ➔ " : " 💥 Bị phòng không bắn hạ tại ";
+        }
+        else if (piece.X == toX && piece.Y == toY)
+        {
+            actionType = " ➔ ";
+        }
+        else
+        {
+            actionType = piece.Kind switch
+            {
+                PieceKind.AirForce => " 💣 Ném bom ➔ ",
+                PieceKind.Warship => " 🎯 Xạ kích ➔ ",
+                _ => " 🎯 Bắn tại chỗ ➔ "
+            };
+        }
 
         var stackedAtDest = board.GetPiecesAt(toX, toY);
         string log;
@@ -326,61 +806,31 @@ public partial class GamePlayForm : BaseForm
         lstMoveLog.Items.Add(log);
         lstMoveLog.TopIndex = lstMoveLog.Items.Count - 1;
 
-        currentTurnSeconds = 45;
+        currentTurnSeconds = _turnDurationSeconds;
         UpdateTurnDisplay();
         UpdateScores();
         UpdateCaptureModeDisplay();
         UpdateStackSelectDisplay(new List<PieceView>());
 
-        // =========================================================================
-        // KIỂM TRA ĐIỀU KIỆN KẾT THÚC VÁN CỜ THEO LUẬT CỜ TƯ LỆNH:
-        // =========================================================================
-
-        // 1. Tướng (Tư lệnh) bị bắt hoặc tiêu diệt
+        // Kiểm tra điều kiện kết thúc ván cờ - Chế độ Tấn công tổng lực (30 phút)
         var blueCmd = board.Pieces.FirstOrDefault(p => p.PieceId == "b_cmd");
         if (blueCmd != null && !blueCmd.IsAlive)
         {
-            EndGame(true, "Tư Lệnh đối phương đã bị tiêu diệt!");
+            int redTotal = board.Pieces.Where(p => p.Side == "red" && p.IsAlive).Sum(p => p.Score) + 50;
+            int blueTotal = board.Pieces.Where(p => p.Side == "blue" && p.IsAlive).Sum(p => p.Score);
+            EndOfflineGame(true, $"Tư Lệnh đối phương đã bị tiêu diệt! (+50đ chiến thuật)\nTổng điểm: Đỏ {redTotal}đ - Xanh {blueTotal}đ");
             return;
         }
 
         var redCmd = board.Pieces.FirstOrDefault(p => p.PieceId == "r_cmd");
         if (redCmd != null && !redCmd.IsAlive)
         {
-            EndGame(false, "Tư Lệnh phe bạn đã bị tiêu diệt!");
+            int redTotal = board.Pieces.Where(p => p.Side == "red" && p.IsAlive).Sum(p => p.Score);
+            int blueTotal = board.Pieces.Where(p => p.Side == "blue" && p.IsAlive).Sum(p => p.Score) + 50;
+            EndOfflineGame(false, $"Tư Lệnh phe bạn đã bị tiêu diệt! (+50đ chiến thuật cho Xanh)\nTổng điểm: Đỏ {redTotal}đ - Xanh {blueTotal}đ");
             return;
         }
 
-        // 2. Toàn bộ quân Không chiến (Không quân) bị tiêu diệt
-        bool blueAirAlive = board.Pieces.Any(p => p.Side == "blue" && p.Kind == PieceKind.AirForce && p.IsAlive);
-        bool redAirAlive = board.Pieces.Any(p => p.Side == "red" && p.Kind == PieceKind.AirForce && p.IsAlive);
-        if (!blueAirAlive && blueCmd != null)
-        {
-            // Đối phương mất toàn bộ không quân
-        }
-
-        // 3. Toàn bộ quân Hải chiến bị tiêu diệt
-        bool blueSeaAlive = board.Pieces.Any(p => p.Side == "blue" && p.Kind == PieceKind.Warship && p.IsAlive);
-        bool redSeaAlive = board.Pieces.Any(p => p.Side == "red" && p.Kind == PieceKind.Warship && p.IsAlive);
-
-        // 4. Toàn bộ Xe tăng, Bộ binh, Pháo binh bị tiêu diệt
-        bool blueGroundAssault = board.Pieces.Any(p => p.Side == "blue" && p.IsAlive &&
-            (p.Kind == PieceKind.Tank || p.Kind == PieceKind.Infantry || p.Kind == PieceKind.Artillery));
-        bool redGroundAssault = board.Pieces.Any(p => p.Side == "red" && p.IsAlive &&
-            (p.Kind == PieceKind.Tank || p.Kind == PieceKind.Infantry || p.Kind == PieceKind.Artillery));
-
-        if (!blueGroundAssault)
-        {
-            EndGame(true, "Toàn bộ lực lượng chủ lực (Xe tăng, Bộ binh, Pháo binh) đối phương đã bị tiêu diệt!");
-            return;
-        }
-        if (!redGroundAssault)
-        {
-            EndGame(false, "Toàn bộ lực lượng chủ lực của bạn đã bị tiêu diệt!");
-            return;
-        }
-
-        // Nếu đối thủ là máy/mô phỏng (chỉ khi bật chế độ Bot) và đến lượt Xanh
         if (isBotEnabled && board.CurrentTurn == "blue")
         {
             Task.Delay(1000).ContinueWith(_ =>
@@ -397,15 +847,11 @@ public partial class GamePlayForm : BaseForm
         }
     }
 
-    /// <summary>
-    /// Mô phỏng nước đi của đối phương tuân thủ nghiêm ngặt Luật Cờ Tư Lệnh
-    /// </summary>
     private void SimulateOpponentMove()
     {
         var bluePieces = board.Pieces.Where(p => p.Side == "blue" && p.IsAlive).ToList();
         if (bluePieces.Count == 0) return;
 
-        // Lấy tất cả các nước đi hợp lệ của tất cả quân xanh
         var allMovable = bluePieces
             .Select(p => new { Piece = p, Moves = board.GetValidMoves(p) })
             .Where(x => x.Moves.Count > 0)
@@ -413,11 +859,10 @@ public partial class GamePlayForm : BaseForm
 
         if (allMovable.Count == 0)
         {
-            EndGame(true, "Đối phương không còn nước đi hợp lệ!");
+            EndOfflineGame(true, "Đối phương không còn nước đi hợp lệ!");
             return;
         }
 
-        // Ưu tiên 1: Nước đi ăn được quân đỏ (đặc biệt là Tư lệnh hoặc vũ khí lớn)
         var captureMoves = allMovable
             .SelectMany(m => m.Moves
                 .Where(dest => board.Pieces.Any(target => target.X == dest.X && target.Y == dest.Y && target.Side == "red" && target.IsAlive))
@@ -432,7 +877,6 @@ public partial class GamePlayForm : BaseForm
         }
         else
         {
-            // Đi ngẫu nhiên một nước hợp lệ
             var pick = allMovable[Random.Shared.Next(allMovable.Count)];
             var dest = pick.Moves[Random.Shared.Next(pick.Moves.Count)];
             board.MovePiece(pick.Piece.PieceId, dest.X, dest.Y);
@@ -441,6 +885,22 @@ public partial class GamePlayForm : BaseForm
 
     private void UpdateTurnDisplay()
     {
+        if (_isOnline)
+        {
+            bool isMyTurn = board.CurrentTurn == _myColor;
+            if (board.CurrentTurn == "red")
+            {
+                lblTurn.Text = isMyTurn ? "LƯỢT ĐI:\n🔴 PHE ĐỎ (LƯỢT CỦA BẠN)" : "LƯỢT ĐI:\n🔴 PHE ĐỎ (ĐỐI THỦ)";
+                lblTurn.ForeColor = Color.FromArgb(192, 57, 43);
+            }
+            else
+            {
+                lblTurn.Text = isMyTurn ? "LƯỢT ĐI:\n🔵 PHE XANH (LƯỢT CỦA BẠN)" : "LƯỢT ĐI:\n🔵 PHE XANH (ĐỐI THỦ)";
+                lblTurn.ForeColor = Color.FromArgb(41, 128, 185);
+            }
+            return;
+        }
+
         if (board.CurrentTurn == "red")
         {
             lblTurn.Text = "LƯỢT ĐI:\n🔴 PHE ĐỎ (BẠN)";
@@ -457,37 +917,27 @@ public partial class GamePlayForm : BaseForm
     {
         int redScore = board.Pieces.Where(p => p.Side == "red" && p.IsAlive).Sum(p => p.Score);
         int blueScore = board.Pieces.Where(p => p.Side == "blue" && p.IsAlive).Sum(p => p.Score);
-        lblPlayerScore.Text = $"Lực lượng: {redScore}đ";
-        lblOpponentScore.Text = $"Lực lượng: {blueScore}đ";
+
+        if (_isOnline && _myColor == "blue")
+        {
+            lblPlayerScore.Text = $"Lực lượng (Xanh): {blueScore}đ";
+            lblOpponentScore.Text = $"Lực lượng (Đỏ): {redScore}đ";
+        }
+        else
+        {
+            lblPlayerScore.Text = $"Lực lượng (Đỏ): {redScore}đ";
+            lblOpponentScore.Text = $"Lực lượng (Xanh): {blueScore}đ";
+        }
     }
 
-    private void EndGame(bool isVictory, string reason)
+    private void EndOfflineGame(bool isVictory, string reason)
     {
+        if (_matchFinished) return;
+        _matchFinished = true;
         gameTimer.Stop();
 
-        string outcome = isVictory ? "red_win" : "blue_win";
-        if (reason.Contains("Hoà") || reason.Contains("hòa") || reason.Contains("Hoà"))
-        {
-            outcome = "draw";
-        }
-
-        // Báo kết quả ván đấu lên server để ghi nhận vào CSDL và phát sóng Real-time qua WebSocket
-        _ = Task.Run(async () =>
-        {
-            await GameApiService.Instance.FinishMatchAsync(_room.RoomCode, outcome, _room.BetAmount);
-        });
-
-        int eloChange = isVictory ? 15 : -12;
-        int coinReward = isVictory ? _room.BetAmount : -_room.BetAmount;
-
-        SessionService.Instance.UpdateElo(eloChange, isVictory);
-        SessionService.Instance.AddCoins(coinReward);
-
         string title = isVictory ? "CHIẾN THẮNG!" : "THẤT BẠI!";
-        string msg = $"{reason}\n\nKết quả: {(isVictory ? "Bạn đã thắng!" : "Bạn đã thua!")}\n" +
-                     $"Biến động ELO: {(eloChange >= 0 ? "+" : "")}{eloChange}\n" +
-                     $"Biến động Xu: {(coinReward >= 0 ? "+" : "")}{coinReward:N0} Xu";
-
+        string msg = $"{reason}\n\nKết quả tập luyện: {(isVictory ? "Phe Đỏ thắng!" : "Phe Xanh thắng!")}";
         MessageBox.Show(this, msg, title, MessageBoxButtons.OK, isVictory ? MessageBoxIcon.Information : MessageBoxIcon.Exclamation);
 
         this.FormClosed -= GamePlayForm_FormClosed;
@@ -500,64 +950,97 @@ public partial class GamePlayForm : BaseForm
         string msg = txtChat.Text.Trim();
         if (string.IsNullOrEmpty(msg)) return;
 
+        if (!_isOnline)
+        {
+            var user = SessionService.Instance.CurrentUser?.Username ?? "Tôi";
+            AddChatLine($"[{user}]: {msg}");
+            txtChat.Clear();
+            return;
+        }
+
         bool sent = await RealtimeService.Instance.SendChatAsync(msg);
         if (!sent)
         {
-            AddChatLine("[Hệ thống] Mất kết nối server, chưa gửi được");
+            AddChatLine("[Hệ thống] Mất kết nối server, chưa gửi được tin nhắn.");
             return;
         }
         txtChat.Clear();
     }
 
-    private void GamePlayForm_RealtimeClosed(object? sender, FormClosedEventArgs e)
-    {
-        RealtimeService.Instance.OnChatMessage -= Realtime_OnChatMessage;
-        RealtimeService.Instance.OnChatRejected -= Realtime_OnSystemText;
-        RealtimeService.Instance.OnRoomNotice -= Realtime_OnSystemText;
-        _ = RealtimeService.Instance.LeaveRoomAsync();
-    }
-
-    private void Realtime_OnChatMessage(ChatMessageModel msg)
-    {
-        if (this.IsDisposed || !this.IsHandleCreated) return;
-        this.BeginInvoke(new Action(() => AddChatLine($"[{msg.Username}]: {msg.Message}")));
-    }
-
-    private void Realtime_OnSystemText(string text)
-    {
-        if (this.IsDisposed || !this.IsHandleCreated) return;
-        this.BeginInvoke(new Action(() => AddChatLine($"[Hệ thống] {text}")));
-    }
-
-    private void AddChatLine(string line)
-    {
-        lstChat.Items.Add(line);
-        lstChat.TopIndex = lstChat.Items.Count - 1;
-    }
-
     private void btnDraw_Click(object? sender, EventArgs e)
     {
-        if (Confirm("Bạn có muốn gửi lời xin hoà tới đối thủ?"))
+        if (_isOnline)
         {
-            lstChat.Items.Add("[Hệ thống] Bạn đã gửi lời xin hoà...");
-            ShowInfo("Đối thủ đã đồng ý hoà trận!");
-            EndGame(false, "Hai bên đồng ý kết quả Hoà.");
+            ShowInfo("Máy chủ hiện chưa hỗ trợ tính năng xin hoà trong trận Online.");
+            return;
+        }
+
+        if (Confirm("Bạn có muốn kết thúc ván tập luyện với kết quả Hoà?"))
+        {
+            _matchFinished = true;
+            gameTimer.Stop();
+            ShowInfo("Ván tập luyện kết thúc Hoà!");
+            this.FormClosed -= GamePlayForm_FormClosed;
+            new LobbyForm().Show();
+            this.Close();
         }
     }
 
-    private void btnSurrender_Click(object? sender, EventArgs e)
+    private async void btnSurrender_Click(object? sender, EventArgs e)
     {
-        if (Confirm("Bạn có chắc chắn muốn ĐẦU HÀNG ván đấu này?"))
+        if (_isOnline)
         {
-            EndGame(false, "Bạn đã đầu hàng ván đấu.");
+            if (Confirm("Rời trận / đầu hàng lúc đang thi đấu sẽ bị xử thua (trừ ELO và điểm uy tín). Bạn chắc chắn chứ?"))
+            {
+                await LeaveOnlineMatchAsync();
+            }
+            return;
+        }
+
+        if (Confirm("Bạn có chắc chắn muốn ĐẦU HÀNG ván tập luyện này?"))
+        {
+            EndOfflineGame(false, "Bạn đã đầu hàng ván đấu.");
         }
     }
 
-    private void btnLeave_Click(object? sender, EventArgs e)
+    private async void btnLeave_Click(object? sender, EventArgs e)
     {
-        if (Confirm("Thoát ván đấu giữa chừng sẽ bị xử thua. Bạn có chắc chắn?"))
+        if (_isOnline)
         {
-            EndGame(false, "Bạn đã rời khỏi trận đấu.");
+            if (Confirm("Thoát ván đấu giữa chừng sẽ bị máy chủ xử thua và trừ điểm uy tín. Bạn có chắc chắn?"))
+            {
+                await LeaveOnlineMatchAsync();
+            }
+            return;
         }
+
+        if (Confirm("Bạn có muốn thoát ván tập luyện?"))
+        {
+            _matchFinished = true;
+            gameTimer.Stop();
+            this.FormClosed -= GamePlayForm_FormClosed;
+            new LobbyForm().Show();
+            this.Close();
+        }
+    }
+
+    private async Task LeaveOnlineMatchAsync()
+    {
+        if (_matchFinished) return;
+        _matchFinished = true;
+        gameTimer.Stop();
+        UnsubscribeOnlineEvents();
+
+        await RealtimeService.Instance.LeaveRoomAsync(_room.RoomCode);
+        var refreshed = await AuthService.GetMeAsync();
+        if (refreshed != null)
+        {
+            SessionService.Instance.SetCurrentUser(refreshed, SessionService.Instance.Token);
+        }
+
+        ShowInfo("Bạn đã rời trận đấu (bị xử thua theo luật máy chủ).");
+        this.FormClosed -= GamePlayForm_FormClosed;
+        new LobbyForm().Show();
+        this.Close();
     }
 }
